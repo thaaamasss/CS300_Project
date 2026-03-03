@@ -15,3 +15,38 @@ Instead of targeting image classification logits, this project performs text-con
 Transferability is achieved by averaging gradients from multiple open-source proxy models.
 
 ---
+
+## Architecture
+
+The attack consists of six main phases:
+
+### Phase 1: Surrogate VLM Initialization
+- Load open-source VLMs (e.g., LLaVA, InstructBLIP, OpenCLIP).
+- Convert input image to tensor form.
+- Enable gradient tracking on image tensor.
+
+### Phase 2: Text-Image Semantic Optimization
+- Define a target output sentence.
+- Compute token-level cross-entropy loss.
+- Use Projected Gradient Descent (PGD) to update pixels.
+
+### Phase 3: Multi-Model Gradient Ensemble
+- Compute gradients from multiple VLMs.
+- Average gradients to improve transferability.
+- Apply iterative updates.
+
+### Phase 4: Perturbation Constraint
+- Enforce L-infinity norm constraint.
+- Clip perturbation to epsilon (e.g., 8/255).
+- Ensure imperceptibility.
+
+### Phase 5: Black-Box Transfer
+- Save adversarial image.
+- Upload to external VLM.
+- Query: "Describe this image."
+
+### Phase 6: Evaluation
+- Measure Attack Success Rate.
+- Compute Structural Similarity Index (SSIM).
+
+---
