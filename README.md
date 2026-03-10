@@ -108,53 +108,6 @@ Different strategies are implemented to select data samples for removal.
 
 ---
 
-# Project Directory Structure
-
-```
-machine-unlearning-project
-│
-├── datasets
-│
-├── models
-│   ├── architectures
-│   └── trained_models
-│
-├── learning_algorithms
-│
-├── unlearning_algorithms
-│
-├── deletion_strategies
-│
-├── experiments
-│
-├── evaluation
-│
-├── results
-│
-├── utils
-│
-├── main.py
-├── requirements.txt
-└── README.md
-```
-
----
-
-# Current Status of the Project
-
-| Component                | Status      |
-| ------------------------ | ----------- |
-| Project Structure        | Completed   |
-| Learning Algorithms      | Implemented |
-| Unlearning Algorithms    | Implemented |
-| Deletion Strategies      | Implemented |
-| Experiment Pipeline      | Implemented |
-| Large-scale Experiments  | In Progress |
-| Result Analysis          | In Progress |
-| Visualization and Graphs | In Progress |
-
----
-
 # Running the Framework
 
 Example command to run experiments for a dataset:
@@ -201,9 +154,3 @@ The next steps for the project include:
 * Generating result visualizations
 * Adding privacy verification methods such as membership inference attacks
 
----
-
-# Author
-
-Thamas Gaykawad
-B.Tech Computer Science
