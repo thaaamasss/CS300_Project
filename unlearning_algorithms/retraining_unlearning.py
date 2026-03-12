@@ -1,109 +1,81 @@
+"""
+retraining_unlearning.py — Fixed
+Fixes applied:
+  #9  Returns best-accuracy checkpoint, not final epoch weights
+
+Gold standard unlearning: retrain from scratch on remaining data only.
+Deleted samples never touch the new model — provable privacy guarantee.
+"""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from tqdm import tqdm
+from torch.utils.data import DataLoader
+import copy
 
 
-# Function to retrain the model from scratch after deletion
-def retraining_unlearning(
-        model_class,
-        remaining_dataset,
-        test_loader,
-        device,
-        input_channels,
-        num_classes,
-        input_size,
-        batch_size=64,
-        epochs=10,
-        learning_rate=0.001):
-
+def retraining_unlearning(model, remaining_dataset, deleted_dataset,
+                          num_classes, in_channels, num_epochs=10,
+                          batch_size=64, lr=0.001, device=None):
     """
-    model_class: model architecture (e.g., CNNModel)
-    remaining_dataset: dataset after deletion
-    test_loader: dataset used for evaluation
-    device: cpu or cuda
+    Retrain a fresh model from scratch on remaining_dataset only.
+    deleted_dataset is accepted but intentionally never used.
+
+    Returns:
+        best model (by training accuracy) trained on remaining data only
     """
+    from models.architectures.cnn_model import CNNModel
 
-    print("Starting full retraining for unlearning...")
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Create a fresh model instance
-    model = model_class(
-        input_channels=input_channels,
-        num_classes=num_classes,
-        input_size=input_size
-    )
+    # Fresh model — old weights discarded entirely
+    new_model = CNNModel(num_classes=num_classes, in_channels=in_channels).to(device)
 
-    # Move model to device
-    model.to(device)
+    remaining_loader = DataLoader(remaining_dataset, batch_size=batch_size,
+                                  shuffle=True, num_workers=2, pin_memory=True)
 
-    # DataLoader for the remaining dataset
-    train_loader = torch.utils.data.DataLoader(
-        remaining_dataset,
-        batch_size=batch_size,
-        shuffle=True
-    )
+    optimizer = optim.Adam(new_model.parameters(), lr=lr)
 
-    # Loss function
+    # FIX #7: cosine annealing scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+
     criterion = nn.CrossEntropyLoss()
 
-    # Optimizer
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    # FIX #9: best-checkpoint tracking
+    best_acc   = 0.0
+    best_state = None
 
-    # Training loop
-    for epoch in range(epochs):
+    for epoch in range(num_epochs):
+        new_model.train()
+        epoch_loss = 0.0
+        correct = total = 0
 
-        model.train()
-        running_loss = 0
-
-        for images, labels in tqdm(train_loader):
-
-            images = images.to(device)
-            labels = labels.to(device)
-
+        for inputs, labels in remaining_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
-
-            outputs = model(images)
-
+            outputs = new_model(inputs)
             loss = criterion(outputs, labels)
-
             loss.backward()
-
             optimizer.step()
+            epoch_loss += loss.item()
+            _, predicted = outputs.max(1)
+            correct += predicted.eq(labels).sum().item()
+            total   += labels.size(0)
 
-            running_loss += loss.item()
+        acc = correct / total
+        scheduler.step()   # FIX #7
 
-        print("Epoch:", epoch + 1, "Training Loss:", running_loss)
+        # FIX #9: save best epoch
+        if acc > best_acc:
+            best_acc   = acc
+            best_state = copy.deepcopy(new_model.state_dict())
 
-    # Evaluate retrained model
-    accuracy = evaluate(model, test_loader, device)
+        print(f"  [Retraining] Epoch [{epoch+1}/{num_epochs}]  "
+              f"Loss: {epoch_loss/len(remaining_loader):.4f}  Acc: {acc:.4f}")
 
-    return model, accuracy
+    # FIX #9: restore best weights
+    new_model.load_state_dict(best_state)
+    print(f"  [Retraining] Best epoch accuracy: {best_acc:.4f}")
 
-
-# Function to evaluate model performance
-def evaluate(model, test_loader, device):
-
-    model.eval()
-
-    correct = 0
-    total = 0
-
-    with torch.no_grad():
-
-        for images, labels in test_loader:
-
-            images = images.to(device)
-            labels = labels.to(device)
-
-            outputs = model(images)
-
-            _, predicted = torch.max(outputs.data, 1)
-
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-
-    accuracy = 100 * correct / total
-
-    print("Test Accuracy after retraining:", accuracy)
-
-    return accuracy
+    return new_model.cpu()
