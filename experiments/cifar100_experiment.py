@@ -1,14 +1,3 @@
-"""
-CIFAR-100 Experiment — Fixed
-Fixes applied:
-  - Uses load_cifar100() from datasets/cifar100/cifar100_loader.py
-  - train_dataset extracted from loader via .dataset
-  - Best model selected by training accuracy (accuracy first, time as tiebreaker)
-  - Each unlearning method receives an independent deepcopy of best_model
-  - loss=0.0 replaced with actual tracked loss (#1)
-  - Augmentation added to loader (#8) — see cifar100_loader.py
-"""
-
 import torch
 import copy
 import time
@@ -17,24 +6,37 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from datasets.cifar100.cifar100_loader import load_cifar100
+from utils.dataset_loader import load_dataset
+from utils.model_saver import save_model
+from utils.config import (
+    BATCH_SIZE, EPOCHS, DELETE_PERCENTAGE,
+    DEVICE, RANDOM_SEED
+)
+
 from learning_algorithms.sgd_training import sgd_training
 from learning_algorithms.adam_training import adam_training
 from learning_algorithms.rmsprop_training import rmsprop_training
 from learning_algorithms.sisa_training import sisa_training
+
 from deletion_strategies.batch_deletion import batch_deletion
+
 from unlearning_algorithms.retraining_unlearning import retraining_unlearning
 from unlearning_algorithms.finetune_unlearning import finetune_unlearning
 from unlearning_algorithms.influence_unlearning import influence_unlearning
 from unlearning_algorithms.sisa_unlearning import sisa_unlearning
-from evaluation.evaluate_learning import evaluate_learning_algorithms as evaluate_learning
-from evaluation.evaluate_unlearning import evaluate_unlearning_algorithms as evaluate_unlearning
+
+from evaluation.evaluate_learning import evaluate_learning_algorithms
+from evaluation.evaluate_unlearning import evaluate_unlearning_algorithms
+
 from torch.utils.data import DataLoader
 
-DEVICE              = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-BATCH_SIZE          = 64
-NUM_EPOCHS          = 10
-DELETION_PERCENTAGE = 10
+torch.manual_seed(RANDOM_SEED)
+device = torch.device(DEVICE if torch.cuda.is_available() else 'cpu')
+
+DATASET_NAME   = 'CIFAR100'
+NUM_CLASSES    = 100
+INPUT_CHANNELS = 3
+INPUT_SIZE     = 32
 
 
 def run_experiment():
@@ -43,10 +45,9 @@ def run_experiment():
     print("=" * 60)
 
     # ----------------------------------------------------------------
-    # Load datasets via repo loader
+    # Load dataset via utils/dataset_loader.py
     # ----------------------------------------------------------------
-    train_loader, test_loader = load_cifar100(batch_size=BATCH_SIZE)
-
+    train_loader, test_loader = load_dataset('cifar100')
     train_dataset = train_loader.dataset
     test_dataset  = test_loader.dataset
 
@@ -62,21 +63,26 @@ def run_experiment():
     learning_results = {}
 
     for name, train_fn in algorithms.items():
-        print(f"\n[CIFAR-100] Training with {name}...")
+        print(f"\n[{DATASET_NAME}] Training with {name}...")
         start = time.time()
 
         model, final_loss = train_fn(
-            train_dataset, num_classes=100, input_channels=3, input_size=32,
-            num_epochs=NUM_EPOCHS, batch_size=BATCH_SIZE, device=DEVICE
+            train_dataset,
+            num_classes=NUM_CLASSES,
+            input_channels=INPUT_CHANNELS,
+            input_size=INPUT_SIZE,
+            num_epochs=EPOCHS,
+            batch_size=BATCH_SIZE,
+            device=device
         )
         elapsed = time.time() - start
 
         model.eval()
-        model.to(DEVICE)
+        model.to(device)
         correct = total = 0
         with torch.no_grad():
             for inputs, labels in test_loader:
-                inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
+                inputs, labels = inputs.to(device), labels.to(device)
                 outputs = model(inputs)
                 _, predicted = outputs.max(1)
                 correct += predicted.eq(labels).sum().item()
@@ -91,30 +97,32 @@ def run_experiment():
         }
         print(f"  {name}: acc={accuracy:.4f}  loss={final_loss:.4f}  time={elapsed:.1f}s")
 
-    evaluate_learning(learning_results, dataset_name='CIFAR100')
+        save_model(model, DATASET_NAME.lower(), 'learning', f"{name.lower()}_model.pth")
+
+    evaluate_learning_algorithms(learning_results, dataset_name=DATASET_NAME)
 
     # ----------------------------------------------------------------
-    # Select best model: accuracy first, time as tiebreaker
+    # Select best model
     # ----------------------------------------------------------------
     best_name, best_result = sorted(
         learning_results.items(),
         key=lambda x: (-x[1]['accuracy'], x[1]['time'])
     )[0]
     best_model = best_result['model']
-    print(f"\n[CIFAR-100] Best learning algorithm: {best_name} "
+    print(f"\n[{DATASET_NAME}] Best learning algorithm: {best_name} "
           f"(acc={best_result['accuracy']:.4f})")
 
     # ----------------------------------------------------------------
-    # PHASE 2: Apply batch deletion
+    # PHASE 2: Batch deletion — DELETE_PERCENTAGE from config
     # ----------------------------------------------------------------
     remaining_dataset, deleted_dataset = batch_deletion(
-        train_dataset, DELETION_PERCENTAGE
+        train_dataset, DELETE_PERCENTAGE
     )
-    print(f"[CIFAR-100] Batch deletion {DELETION_PERCENTAGE}%. "
+    print(f"[{DATASET_NAME}] Batch deletion {DELETE_PERCENTAGE}%. "
           f"Remaining: {len(remaining_dataset)}  Deleted: {len(deleted_dataset)}")
 
     # ----------------------------------------------------------------
-    # PHASE 3: Each unlearning method on an independent deepcopy
+    # PHASE 3: Unlearning — each method on independent deepcopy
     # ----------------------------------------------------------------
     unlearn_algorithms = {
         'Retraining': retraining_unlearning,
@@ -125,20 +133,24 @@ def run_experiment():
     unlearning_results = {}
 
     for name, unlearn_fn in unlearn_algorithms.items():
-        print(f"\n[CIFAR-100] Unlearning with {name}...")
+        print(f"\n[{DATASET_NAME}] Unlearning with {name}...")
 
         model_copy = copy.deepcopy(best_model)
 
         start = time.time()
         result_model = unlearn_fn(
             model_copy, remaining_dataset, deleted_dataset,
-            num_classes=100, input_channels=3, input_size=32,
-            num_epochs=NUM_EPOCHS, batch_size=BATCH_SIZE, device=DEVICE
+            num_classes=NUM_CLASSES,
+            input_channels=INPUT_CHANNELS,
+            input_size=INPUT_SIZE,
+            num_epochs=EPOCHS,
+            batch_size=BATCH_SIZE,
+            device=device
         )
         elapsed = time.time() - start
 
         result_model.eval()
-        result_model.to(DEVICE)
+        result_model.to(device)
 
         remaining_loader = DataLoader(remaining_dataset, batch_size=BATCH_SIZE, shuffle=False)
         deleted_loader   = DataLoader(deleted_dataset,   batch_size=BATCH_SIZE, shuffle=False)
@@ -147,7 +159,7 @@ def run_experiment():
             correct = total = 0
             with torch.no_grad():
                 for inputs, labels in loader:
-                    inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
+                    inputs, labels = inputs.to(device), labels.to(device)
                     outputs = result_model(inputs)
                     _, predicted = outputs.max(1)
                     correct += predicted.eq(labels).sum().item()
@@ -155,16 +167,19 @@ def run_experiment():
             return correct / total
 
         unlearning_results[name] = {
-            'model':               result_model.cpu(),
-            'remaining_accuracy':  get_acc(remaining_loader),
-            'deleted_accuracy':    get_acc(deleted_loader),
-            'time':                elapsed,
+            'model':              result_model.cpu(),
+            'remaining_accuracy': get_acc(remaining_loader),
+            'deleted_accuracy':   get_acc(deleted_loader),
+            'time':               elapsed,
         }
         print(f"  {name}: remaining={unlearning_results[name]['remaining_accuracy']:.4f}  "
               f"deleted={unlearning_results[name]['deleted_accuracy']:.4f}  "
               f"time={elapsed:.1f}s")
 
-    evaluate_unlearning(unlearning_results, dataset_name='CIFAR100')
+        save_model(result_model, DATASET_NAME.lower(), 'unlearning',
+                   f"{name.lower()}_model.pth")
+
+    evaluate_unlearning_algorithms(unlearning_results, dataset_name=DATASET_NAME)
 
 
 if __name__ == '__main__':
