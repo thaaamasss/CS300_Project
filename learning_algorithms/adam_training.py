@@ -1,95 +1,78 @@
+"""
+adam_training.py — Fixed
+Fixes applied:
+  #1  Returns (model, final_loss) instead of just model
+  #7  Added CosineAnnealingLR scheduler
+  #9  Saves and returns best-accuracy checkpoint
+"""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from tqdm import tqdm
+from torch.utils.data import DataLoader
+import copy
 
 
-# Function to train the model using the Adam optimizer
-def train_adam(model, train_loader, test_loader, device, epochs=10, learning_rate=0.001):
+def adam_training(dataset, num_classes, in_channels, num_epochs=10,
+                  batch_size=64, lr=0.001, device=None):
+    """
+    Train a CNNModel with Adam + cosine annealing.
 
-    # Move the model to the selected device (CPU or GPU)
-    model.to(device)
+    Returns:
+        (best_model, final_loss) tuple
+    """
+    from models.architectures.cnn_model import CNNModel
 
-    # CrossEntropyLoss is used for multi-class classification problems
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
+                        num_workers=2, pin_memory=True)
+
+    model = CNNModel(num_classes=num_classes, in_channels=in_channels).to(device)
+
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    # FIX #7: cosine annealing LR scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+
     criterion = nn.CrossEntropyLoss()
 
-    # Define Adam optimizer
-    # Adam adapts the learning rate automatically during training
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    # FIX #9: track best model checkpoint
+    best_acc   = 0.0
+    best_state = None
+    final_loss = 0.0
 
-    # Loop over the dataset multiple times (epochs)
-    for epoch in range(epochs):
-
-        # Set model to training mode
+    for epoch in range(num_epochs):
         model.train()
+        epoch_loss = 0.0
+        correct = total = 0
 
-        running_loss = 0
-
-        # Iterate through batches of training data
-        for images, labels in tqdm(train_loader):
-
-            # Move batch to device
-            images = images.to(device)
-            labels = labels.to(device)
-
-            # Reset gradients from previous iteration
+        for inputs, labels in loader:
+            inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
-
-            # Forward pass: compute model predictions
-            outputs = model(images)
-
-            # Compute the loss between predictions and actual labels
+            outputs = model(inputs)
             loss = criterion(outputs, labels)
-
-            # Backpropagation: compute gradients
             loss.backward()
-
-            # Update model parameters using Adam optimizer
             optimizer.step()
+            epoch_loss += loss.item()
+            _, predicted = outputs.max(1)
+            correct += predicted.eq(labels).sum().item()
+            total   += labels.size(0)
 
-            # Accumulate loss for reporting
-            running_loss += loss.item()
+        final_loss = epoch_loss / len(loader)
+        acc = correct / total
+        scheduler.step()   # FIX #7
 
-        print("Epoch:", epoch + 1, "Training Loss:", running_loss)
+        # FIX #9: save best checkpoint
+        if acc > best_acc:
+            best_acc   = acc
+            best_state = copy.deepcopy(model.state_dict())
 
+        print(f"  [Adam] Epoch [{epoch+1}/{num_epochs}]  "
+              f"Loss: {final_loss:.4f}  Acc: {acc:.4f}  LR: {scheduler.get_last_lr()[0]:.6f}")
 
-    # After training is complete, evaluate model on test data
-    accuracy = evaluate(model, test_loader, device)
+    # FIX #9: restore best weights
+    model.load_state_dict(best_state)
 
-    return model, accuracy
-
-
-
-# Function to evaluate the trained model
-def evaluate(model, test_loader, device):
-
-    # Set model to evaluation mode
-    model.eval()
-
-    correct = 0
-    total = 0
-
-    # Disable gradient computation during evaluation
-    with torch.no_grad():
-
-        for images, labels in test_loader:
-
-            images = images.to(device)
-            labels = labels.to(device)
-
-            # Forward pass
-            outputs = model(images)
-
-            # Get predicted class (highest score)
-            _, predicted = torch.max(outputs.data, 1)
-
-            total += labels.size(0)
-
-            # Count correct predictions
-            correct += (predicted == labels).sum().item()
-
-    accuracy = 100 * correct / total
-
-    print("Test Accuracy:", accuracy)
-
-    return accuracy
+    return model.cpu(), final_loss   # FIX #1
