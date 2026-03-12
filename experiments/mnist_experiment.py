@@ -1,283 +1,161 @@
+"""
+MNIST Experiment — Fixed
+Fixes applied:
+  #1  loss=0.0 replaced with actual tracked loss
+  #8  Data augmentation added (train only)
+"""
+
 import torch
-import time
-import copy
+import torchvision
+import torchvision.transforms as transforms
+from torch.utils.data import DataLoader, Subset
+import random, time, sys, os
 
-from utils.dataset_loader import load_dataset
-from utils.model_saver import save_model
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from models.architectures.cnn_model import CNNModel
-
-from learning_algorithms.sgd_training import train_sgd
-from learning_algorithms.adam_training import train_adam
-from learning_algorithms.rmsprop_training import train_rmsprop
-from learning_algorithms.sisa_training import train_sisa
-
+from learning_algorithms.sgd_training import sgd_training
+from learning_algorithms.adam_training import adam_training
+from learning_algorithms.rmsprop_training import rmsprop_training
+from learning_algorithms.sisa_training import sisa_training
 from deletion_strategies.random_deletion import random_deletion
-
 from unlearning_algorithms.retraining_unlearning import retraining_unlearning
 from unlearning_algorithms.finetune_unlearning import finetune_unlearning
 from unlearning_algorithms.influence_unlearning import influence_unlearning
 from unlearning_algorithms.sisa_unlearning import sisa_unlearning
-from evaluation.metrics import evaluate_model
-from evaluation.evaluate_learning import evaluate_learning_algorithms
-from evaluation.evaluate_unlearning import evaluate_unlearning_algorithms
+from evaluation.evaluate_learning import evaluate_learning
+from evaluation.evaluate_unlearning import evaluate_unlearning
 
-from utils.config import DELETE_SAMPLES
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+DELETE_SAMPLES = 500
+BATCH_SIZE = 64
+NUM_EPOCHS = 10
 
-def run_mnist_experiment():
+# FIX #8: augmentation for training set
+train_transform = transforms.Compose([
+    transforms.RandomCrop(28, padding=4),       # MNIST is 28x28
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    transforms.Normalize((0.1307,), (0.3081,))
+])
+
+test_transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.1307,), (0.3081,))
+])
+
+train_dataset = torchvision.datasets.MNIST(root='./data', train=True,
+                                            download=True, transform=train_transform)
+test_dataset  = torchvision.datasets.MNIST(root='./data', train=False,
+                                            download=True, transform=test_transform)
+test_loader   = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    print("Running MNIST experiment on:", device)
-
-    # ------------------------------------------------
-    # Load dataset
-    # ------------------------------------------------
-
-    train_loader, test_loader = load_dataset("mnist")
-    train_dataset = train_loader.dataset
-
-    # ------------------------------------------------
-    # TRAIN USING SGD
-    # ------------------------------------------------
-
-    model_sgd = CNNModel(input_channels=1, num_classes=10, input_size=28)
-
-    start = time.time()
-
-    trained_sgd, acc_sgd = train_sgd(
-        model_sgd,
-        train_loader,
-        test_loader,
-        device
-    )
-
-    sgd_time = time.time() - start
-    save_model(trained_sgd, "mnist", "learning", "sgd_model.pth")
-
-    # ------------------------------------------------
-    # TRAIN USING ADAM
-    # ------------------------------------------------
-
-    model_adam = CNNModel(input_channels=1, num_classes=10, input_size=28)
-
-    start = time.time()
-
-    trained_adam, acc_adam = train_adam(
-        model_adam,
-        train_loader,
-        test_loader,
-        device
-    )
-
-    adam_time = time.time() - start
-    save_model(trained_adam, "mnist", "learning", "adam_model.pth")
-
-    # ------------------------------------------------
-    # TRAIN USING RMSPROP
-    # ------------------------------------------------
-
-    model_rms = CNNModel(input_channels=1, num_classes=10, input_size=28)
-
-    start = time.time()
-
-    trained_rms, acc_rms = train_rmsprop(
-        model_rms,
-        train_loader,
-        test_loader,
-        device
-    )
-
-    rms_time = time.time() - start
-    save_model(trained_rms, "mnist", "learning", "rmsprop_model.pth")
-
-    # ------------------------------------------------
-    # TRAIN USING SISA
-    # ------------------------------------------------
-
-    # model_sisa = CNNModel(input_channels=1, num_classes=10, input_size=28)
-
-    start = time.time()
-
-    trained_sisa, acc_sisa = train_sisa(
-        CNNModel,
-        train_loader.dataset,
-        test_loader,
-        device,
-        input_channels=1,
-        num_classes=10,
-        input_size=28
-    )
-
-    sisa_time = time.time() - start
-
-    save_model(trained_sisa, "mnist", "learning", "sisa_model.pth")
-
-    # ------------------------------------------------
-    # STORE LEARNING RESULTS
-    # ------------------------------------------------
-
-    learning_results = {
-        "SGD": {"accuracy": acc_sgd, "time": sgd_time, "loss": 0.0},
-        "Adam": {"accuracy": acc_adam, "time": adam_time, "loss": 0.0},
-        "RMSProp": {"accuracy": acc_rms, "time": rms_time, "loss": 0.0},
-        "SISA": {"accuracy": acc_sisa, "time": sisa_time, "loss": 0.0}
+def run_learning():
+    algorithms = {
+        'SGD':     sgd_training,
+        'Adam':    adam_training,
+        'RMSProp': rmsprop_training,
+        'SISA':    sisa_training,
     }
+    learning_results = {}
 
-    evaluate_learning_algorithms(learning_results, "mnist")
+    for name, train_fn in algorithms.items():
+        print(f"\n[MNIST] Training with {name}...")
+        start = time.time()
 
-    # ------------------------------------------------
-    # SELECT BEST LEARNING ALGORITHM
-    # Accuracy first, time as tie-breaker
-    # ------------------------------------------------
+        # FIX #1: training functions now return (model, final_loss) — see fixed training files
+        model, final_loss = train_fn(
+            train_dataset, num_classes=10, in_channels=1,
+            num_epochs=NUM_EPOCHS, batch_size=BATCH_SIZE, device=DEVICE
+        )
+        elapsed = time.time() - start
 
-    best_algorithm = sorted(
-        learning_results.items(),
-        key=lambda x: (-x[1]["accuracy"], x[1]["time"])
-    )[0][0]
+        # Evaluate accuracy on test set
+        model.eval()
+        correct = total = 0
+        with torch.no_grad():
+            for inputs, labels in test_loader:
+                inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
+                outputs = model(inputs)
+                _, predicted = outputs.max(1)
+                correct += predicted.eq(labels).sum().item()
+                total += labels.size(0)
+        accuracy = correct / total
 
-    print("Best learning algorithm:", best_algorithm)
-
-    trained_models = {
-        "SGD": trained_sgd,
-        "Adam": trained_adam,
-        "RMSProp": trained_rms,
-        "SISA": trained_sisa
-    }
-
-    best_model = trained_models[best_algorithm]
-
-    # ------------------------------------------------
-    # APPLY DELETION STRATEGY
-    # ------------------------------------------------
-
-    remaining_dataset, deleted_dataset = random_deletion(
-        train_dataset,
-        DELETE_SAMPLES
-    )
-
-    # ------------------------------------------------
-    # UNLEARNING : RETRAINING
-    # ------------------------------------------------
-
-    start = time.time()
-
-    retrained_model, retrain_acc = retraining_unlearning(
-        CNNModel,
-        remaining_dataset,
-        test_loader,
-        device,
-        input_channels=1,
-        num_classes=10,
-        input_size=28
-    )
-
-    retrain_time = time.time() - start
-    deleted_acc_retrain = evaluate_model(
-        retrained_model,
-        deleted_dataset,
-        device
-    )
-    save_model(retrained_model, "mnist", "unlearning", "retraining_model.pth")
-
-    # ------------------------------------------------
-    # UNLEARNING : FINETUNING
-    # ------------------------------------------------
-
-    model_copy = copy.deepcopy(best_model)
-
-    start = time.time()
-
-    finetuned_model, finetune_acc = finetune_unlearning(
-        model_copy,
-        remaining_dataset,
-        test_loader,
-        device
-    )
-
-    finetune_time = time.time() - start
-    deleted_acc_finetune = evaluate_model(
-        finetuned_model,
-        deleted_dataset,
-        device
-    )
-    save_model(finetuned_model, "mnist", "unlearning", "finetune_model.pth")
-
-    # ------------------------------------------------
-    # UNLEARNING : INFLUENCE METHOD
-    # ------------------------------------------------
-
-    model_copy = copy.deepcopy(best_model)
-
-    start = time.time()
-
-    influence_model, influence_acc = influence_unlearning(
-        model_copy,
-        deleted_dataset,
-        test_loader,
-        device
-    )
-
-    influence_time = time.time() - start
-    deleted_acc_influence = evaluate_model(
-        influence_model,
-        deleted_dataset,
-        device
-    )
-    save_model(influence_model, "mnist", "unlearning", "influence_model.pth")
-
-    # ------------------------------------------------
-    # UNLEARNING : SISA
-    # ------------------------------------------------
-
-    model_copy = copy.deepcopy(best_model)
-
-    start = time.time()
-
-    sisa_unlearn_model, sisa_unlearn_acc = sisa_unlearning(
-        model_copy,
-        remaining_dataset,
-        test_loader,
-        device
-    )
-
-    sisa_unlearn_time = time.time() - start
-    deleted_acc_sisa = evaluate_model(
-        sisa_unlearn_model,
-        deleted_dataset,
-        device
-    )
-    save_model(sisa_unlearn_model, "mnist", "unlearning", "sisa_unlearn_model.pth")
-
-    # ------------------------------------------------
-    # STORE UNLEARNING RESULTS
-    # ------------------------------------------------
-
-    unlearning_results = {
-        "Retraining": {
-            "remaining_accuracy": retrain_acc,
-            "deleted_accuracy": deleted_acc_retrain,
-            "time": retrain_time
-        },
-        "FineTuning": {
-            "remaining_accuracy": finetune_acc,
-            "deleted_accuracy": deleted_acc_finetune,
-            "time": finetune_time
-        },
-        "Influence": {
-            "remaining_accuracy": influence_acc,
-            "deleted_accuracy": deleted_acc_influence,
-            "time": influence_time
-        },
-        "SISA": {
-            "remaining_accuracy": sisa_unlearn_acc,
-            "deleted_accuracy": deleted_acc_sisa,
-            "time": sisa_unlearn_time
+        learning_results[name] = {
+            'model':    model,
+            'accuracy': accuracy,
+            'time':     elapsed,
+            'loss':     final_loss,   # FIX #1: actual loss, not 0.0
         }
+        print(f"  {name}: acc={accuracy:.4f}  loss={final_loss:.4f}  time={elapsed:.1f}s")
+
+    return learning_results
+
+
+def run_unlearning(best_model, train_dataset):
+    deleted_indices, remaining_dataset, deleted_dataset = random_deletion(
+        train_dataset, DELETE_SAMPLES
+    )
+
+    algorithms = {
+        'Retraining': retraining_unlearning,
+        'FineTuning':  finetune_unlearning,
+        'Influence':   influence_unlearning,
+        'SISA':        sisa_unlearning,
     }
+    unlearning_results = {}
 
-    evaluate_unlearning_algorithms(unlearning_results, "mnist")
+    for name, unlearn_fn in algorithms.items():
+        print(f"\n[MNIST] Unlearning with {name}...")
+        start = time.time()
+        result_model = unlearn_fn(
+            best_model, remaining_dataset, deleted_dataset,
+            num_classes=10, in_channels=1,
+            num_epochs=NUM_EPOCHS, batch_size=BATCH_SIZE, device=DEVICE
+        )
+        elapsed = time.time() - start
 
-if __name__ == "__main__":
-    run_mnist_experiment()
+        # Evaluate on remaining data
+        remaining_loader = DataLoader(remaining_dataset, batch_size=BATCH_SIZE, shuffle=False)
+        deleted_loader   = DataLoader(deleted_dataset,  batch_size=BATCH_SIZE, shuffle=False)
 
+        result_model.eval()
+        def get_acc(loader):
+            correct = total = 0
+            with torch.no_grad():
+                for inputs, labels in loader:
+                    inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
+                    outputs = result_model(inputs)
+                    _, predicted = outputs.max(1)
+                    correct += predicted.eq(labels).sum().item()
+                    total   += labels.size(0)
+            return correct / total
+
+        unlearning_results[name] = {
+            'model':            result_model,
+            'remaining_accuracy': get_acc(remaining_loader),
+            'deleted_accuracy':   get_acc(deleted_loader),
+            'time':             elapsed,
+        }
+
+    return unlearning_results
+
+
+if __name__ == '__main__':
+    print("=" * 60)
+    print("MNIST EXPERIMENT")
+    print("=" * 60)
+
+    learning_results = run_learning()
+    evaluate_learning(learning_results, dataset_name='MNIST')
+
+    best_algo = sorted(
+        learning_results.items(),
+        key=lambda x: (-x[1]['accuracy'], x[1]['time'])
+    )[0]
+    print(f"\nBest learning algorithm: {best_algo[0]} ({best_algo[1]['accuracy']:.4f})")
+
+    unlearning_results = run_unlearning(best_algo[1]['model'], train_dataset)
+    evaluate_unlearning(unlearning_results, dataset_name='MNIST')
