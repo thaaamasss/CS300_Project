@@ -17,7 +17,7 @@ import copy
 
 
 def finetune_unlearning(model, remaining_dataset, deleted_dataset,
-                        num_classes, in_channels, num_epochs=5,
+                        num_classes, input_channels, input_size, num_epochs=5,
                         batch_size=64, lr=0.0005, device=None):
     """
     Fine-tune the existing model on remaining_dataset only.
