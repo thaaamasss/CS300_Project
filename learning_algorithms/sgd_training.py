@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 import copy
 
 
-def sgd_training(dataset, num_classes, in_channels, num_epochs=10,
+def sgd_training(dataset, num_classes, input_channels, input_size, num_epochs=10,
                  batch_size=64, lr=0.01, device=None):
     """
     Train a CNNModel with SGD + momentum + cosine annealing.
@@ -30,7 +30,7 @@ def sgd_training(dataset, num_classes, in_channels, num_epochs=10,
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
                         num_workers=2, pin_memory=True)
 
-    model = CNNModel(num_classes=num_classes, in_channels=in_channels).to(device)
+    model = CNNModel(input_channels=input_channels, num_classes=num_classes, input_size=input_size).to(device)
 
     # FIX #6: momentum=0.9 and weight_decay — standard SGD, not vanilla gradient descent
     optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
