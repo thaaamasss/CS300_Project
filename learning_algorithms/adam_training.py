@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 import copy
 
 
-def adam_training(dataset, num_classes, in_channels, num_epochs=10,
+def adam_training(dataset, num_classes, input_channels, input_size, num_epochs=10,
                   batch_size=64, lr=0.001, device=None):
     """
     Train a CNNModel with Adam + cosine annealing.
@@ -29,7 +29,7 @@ def adam_training(dataset, num_classes, in_channels, num_epochs=10,
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
                         num_workers=2, pin_memory=True)
 
-    model = CNNModel(num_classes=num_classes, in_channels=in_channels).to(device)
+    model = CNNModel(input_channels=input_channels, num_classes=num_classes, input_size=input_size).to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
