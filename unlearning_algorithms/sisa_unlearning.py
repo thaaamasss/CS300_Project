@@ -1,17 +1,20 @@
 """
-CORRECTED SISA Unlearning Implementation
------------------------------------------
-Original bug: Fine-tuned the ENTIRE SISAEnsemble on remaining_dataset.
-              This is NOT true SISA unlearning — it behaves like fine-tuning.
+sisa_unlearning.py — Fixed
+--------------------------
+True SISA unlearning: retrain only the shards that contain deleted samples.
 
-True SISA unlearning:
-    1. Identify WHICH shards contain deleted samples
-    2. Retrain ONLY those shards from scratch on their shard data minus deleted samples
-    3. Leave all other shards completely untouched
-    4. Ensemble inference (logit averaging) remains the same
+Interface matches all other unlearning functions:
+    sisa_unlearning(model, remaining_dataset, deleted_dataset,
+                    num_classes, input_channels, input_size, ...) -> model
 
-This gives a provable guarantee: deleted samples never touch the retrained shard,
-and untouched shards are identical to before (no collateral damage).
+Two cases handled:
+  Case A — model is a SISAEnsemble with shard_indices:
+      True SISA unlearning — identify affected shards, retrain only those.
+
+  Case B — model is a plain CNNModel (e.g. best learning algo was Adam):
+      Fall back to fine-tuning on remaining_dataset.
+      Logs a clear warning so the limitation is visible in output.
+      This matches the original project's behaviour for non-SISA best models.
 """
 
 import torch
@@ -22,313 +25,218 @@ import copy
 import time
 
 
-def sisa_unlearning(sisa_model, full_dataset, deleted_indices, num_epochs=10,
-                    batch_size=64, lr=0.001, device=None):
+def sisa_unlearning(model, remaining_dataset, deleted_dataset,
+                    num_classes, input_channels, input_size,
+                    num_epochs=10, batch_size=64, lr=0.001, device=None):
     """
-    True SISA unlearning: retrain only the shards that contain deleted samples.
+    SISA unlearning with same interface as all other unlearning functions.
 
     Args:
-        sisa_model     : trained SISAEnsemble (has .shard_models and .shard_indices)
-        full_dataset   : the original full training dataset (before any deletion)
-        deleted_indices: list/set of indices (into full_dataset) that must be forgotten
-        num_epochs     : epochs to retrain each affected shard (default matches training)
-        batch_size     : dataloader batch size
-        lr             : learning rate for retraining (same as original training lr)
-        device         : torch.device (auto-detected if None)
+        model             : trained model (SISAEnsemble or plain CNNModel)
+        remaining_dataset : dataset after deletion
+        deleted_dataset   : samples to forget
+        num_classes       : number of output classes
+        input_channels    : input channels (1 or 3)
+        input_size        : spatial input size (28 or 32)
+        num_epochs        : epochs for retraining affected shards
+        batch_size        : dataloader batch size
+        lr                : Adam learning rate
+        device            : torch.device
 
     Returns:
-        dict with keys:
-            'model'           : updated SISAEnsemble (affected shards retrained)
-            'affected_shards' : list of shard indices that were retrained
-            'time'            : total wall-clock time in seconds
+        updated model (cpu) — same type as input model
     """
-
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # -------------------------------------------------------------------------
-    # STEP 1: Validate that the model carries shard assignment metadata
-    # -------------------------------------------------------------------------
-    # SISAEnsemble must store which original dataset indices belong to each shard.
-    # The original sisa_training.py does NOT save this — see note at bottom.
-    # We assume the fixed SISAEnsemble stores self.shard_indices as a list of lists.
-
-    if not hasattr(sisa_model, 'shard_indices') or sisa_model.shard_indices is None:
-        raise AttributeError(
-            "SISAEnsemble must store shard_indices (list of lists of dataset indices). "
-            "The original implementation does not save this — see sisa_training_fixed.py "
-            "for the corrected training code that saves shard assignments."
+    # ------------------------------------------------------------------
+    # Case A: True SISA unlearning — SISAEnsemble with shard_indices
+    # ------------------------------------------------------------------
+    if hasattr(model, 'shard_indices') and model.shard_indices is not None:
+        return _true_sisa_unlearning(
+            model, remaining_dataset, deleted_dataset,
+            num_epochs=num_epochs, batch_size=batch_size,
+            lr=lr, device=device
         )
 
-    deleted_set = set(deleted_indices)
+    # ------------------------------------------------------------------
+    # Case B: Plain CNNModel — fall back to fine-tuning on remaining data
+    # Best learning algorithm was not SISA, so no shard structure exists.
+    # ------------------------------------------------------------------
+    print("[SISA Unlearning] WARNING: model has no shard_indices "
+          "(best learning algo was not SISA).")
+    print("[SISA Unlearning] Falling back to fine-tuning on remaining data.")
+
+    return _fallback_finetune(
+        model, remaining_dataset,
+        num_epochs=num_epochs, batch_size=batch_size,
+        lr=lr, device=device
+    )
+
+
+# ----------------------------------------------------------------------
+# TRUE SISA UNLEARNING (Case A)
+# ----------------------------------------------------------------------
+
+def _true_sisa_unlearning(sisa_model, remaining_dataset, deleted_dataset,
+                           num_epochs, batch_size, lr, device):
+    """Retrain only shards that contain deleted samples."""
+
+    # Build set of deleted indices relative to the original full dataset
+    # deleted_dataset is a Subset — recover its original indices
+    if hasattr(deleted_dataset, 'indices'):
+        deleted_set = set(deleted_dataset.indices)
+    else:
+        # fallback: use range if indices not available
+        deleted_set = set(range(len(deleted_dataset)))
+
     num_shards = len(sisa_model.shard_models)
 
-    # -------------------------------------------------------------------------
-    # STEP 2: Identify which shards contain at least one deleted sample
-    # -------------------------------------------------------------------------
+    # Identify affected shards
     affected_shards = []
     for shard_id in range(num_shards):
         shard_idx_set = set(sisa_model.shard_indices[shard_id])
-        if shard_idx_set & deleted_set:          # intersection is non-empty
+        if shard_idx_set & deleted_set:
             affected_shards.append(shard_id)
 
-    print(f"[SISA Unlearning] Total shards      : {num_shards}")
-    print(f"[SISA Unlearning] Deleted samples   : {len(deleted_set)}")
-    print(f"[SISA Unlearning] Affected shards   : {affected_shards}")
-    print(f"[SISA Unlearning] Untouched shards  : "
+    print(f"[SISA Unlearning] Total shards     : {num_shards}")
+    print(f"[SISA Unlearning] Deleted samples  : {len(deleted_set)}")
+    print(f"[SISA Unlearning] Affected shards  : {affected_shards}")
+    print(f"[SISA Unlearning] Untouched shards : "
           f"{[i for i in range(num_shards) if i not in affected_shards]}")
 
     if not affected_shards:
-        print("[SISA Unlearning] No affected shards found. Nothing to retrain.")
-        return {
-            'model': sisa_model,
-            'affected_shards': [],
-            'time': 0.0
-        }
+        print("[SISA Unlearning] No affected shards. Nothing to retrain.")
+        return sisa_model.cpu()
 
-    # -------------------------------------------------------------------------
-    # STEP 3: Retrain each affected shard from scratch on (shard_data - deleted)
-    # -------------------------------------------------------------------------
-    start_time = time.time()
+    criterion = nn.CrossEntropyLoss()
+
+    # Need the full original dataset to rebuild shard subsets
+    # remaining_dataset + deleted_dataset together = original train data
+    # We use remaining_dataset indices to filter each shard
+    if hasattr(remaining_dataset, 'indices'):
+        remaining_set = set(remaining_dataset.indices)
+    else:
+        remaining_set = None   # can't filter, retrain on all remaining
 
     for shard_id in affected_shards:
         print(f"\n[SISA Unlearning] Retraining shard {shard_id} from scratch...")
 
-        # Build the new shard dataset: original shard indices minus deleted ones
         original_shard_indices = sisa_model.shard_indices[shard_id]
-        remaining_shard_indices = [
-            idx for idx in original_shard_indices
-            if idx not in deleted_set
-        ]
+
+        # Remove deleted indices from this shard
+        if remaining_set is not None:
+            remaining_shard_indices = [
+                idx for idx in original_shard_indices if idx in remaining_set
+            ]
+        else:
+            remaining_shard_indices = [
+                idx for idx in original_shard_indices if idx not in deleted_set
+            ]
+
+        print(f"  Shard {shard_id}: {len(original_shard_indices)} -> "
+              f"{len(remaining_shard_indices)} samples after deletion")
 
         if len(remaining_shard_indices) == 0:
-            print(f"  WARNING: Shard {shard_id} has no remaining samples after deletion. "
-                  f"Reinitialising with random weights.")
-            # Re-initialise model with fresh random weights (no training data left)
+            print(f"  WARNING: Shard {shard_id} empty after deletion. Reinitialising.")
             sisa_model.shard_models[shard_id].apply(_reset_weights)
             continue
 
-        print(f"  Shard {shard_id}: {len(original_shard_indices)} → "
-              f"{len(remaining_shard_indices)} samples "
-              f"(removed {len(original_shard_indices) - len(remaining_shard_indices)})")
-
-        # Create DataLoader for this shard's remaining data
-        shard_subset = Subset(full_dataset, remaining_shard_indices)
+        # Need the base dataset to build a Subset — get it from remaining_dataset
+        base_dataset = _get_base_dataset(remaining_dataset)
+        shard_subset = Subset(base_dataset, remaining_shard_indices)
         shard_loader = DataLoader(shard_subset, batch_size=batch_size,
                                   shuffle=True, num_workers=2, pin_memory=True)
 
-        # Reset shard model to fresh random weights — TRUE retraining from scratch
-        # This is the key difference from fine-tuning: we do NOT use the old weights
+        # Reset shard to fresh random weights — true retraining from scratch
         sisa_model.shard_models[shard_id].apply(_reset_weights)
         shard_model = sisa_model.shard_models[shard_id].to(device)
 
         optimizer = optim.Adam(shard_model.parameters(), lr=lr)
-        criterion = nn.CrossEntropyLoss()
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
 
         shard_model.train()
         for epoch in range(num_epochs):
             epoch_loss = 0.0
-            correct = 0
-            total = 0
-
+            correct = total = 0
             for inputs, labels in shard_loader:
                 inputs, labels = inputs.to(device), labels.to(device)
-
                 optimizer.zero_grad()
                 outputs = shard_model(inputs)
                 loss = criterion(outputs, labels)
                 loss.backward()
                 optimizer.step()
-
                 epoch_loss += loss.item()
                 _, predicted = outputs.max(1)
                 correct += predicted.eq(labels).sum().item()
-                total += labels.size(0)
-
+                total   += labels.size(0)
+            scheduler.step()
             acc = 100.0 * correct / total
             print(f"  Epoch [{epoch+1}/{num_epochs}]  "
                   f"Loss: {epoch_loss/len(shard_loader):.4f}  Acc: {acc:.2f}%")
 
-        # Put the retrained shard back in the ensemble (in-place, already a reference)
         sisa_model.shard_models[shard_id] = shard_model.cpu()
 
-    elapsed = time.time() - start_time
-    print(f"\n[SISA Unlearning] Done. Retrained {len(affected_shards)}/{num_shards} shards "
-          f"in {elapsed:.2f}s")
-    print(f"[SISA Unlearning] Untouched shards carry their original weights — "
-          f"no collateral damage.")
-
-    return {
-        'model': sisa_model,
-        'affected_shards': affected_shards,
-        'time': elapsed
-    }
+    print(f"\n[SISA Unlearning] Done. Retrained {len(affected_shards)}/{num_shards} shards.")
+    return sisa_model.cpu()
 
 
-# =============================================================================
-# HELPER: Reset model weights to fresh random initialisation
-# =============================================================================
+# ----------------------------------------------------------------------
+# FALLBACK FINE-TUNE (Case B)
+# ----------------------------------------------------------------------
+
+def _fallback_finetune(model, remaining_dataset, num_epochs, batch_size, lr, device):
+    """Fine-tune on remaining data when no shard structure is available."""
+
+    unlearn_model = copy.deepcopy(model).to(device)
+    remaining_loader = DataLoader(remaining_dataset, batch_size=batch_size,
+                                  shuffle=True, num_workers=2, pin_memory=True)
+    optimizer = optim.Adam(unlearn_model.parameters(), lr=lr)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+    criterion = nn.CrossEntropyLoss()
+
+    best_acc   = 0.0
+    best_state = copy.deepcopy(unlearn_model.state_dict())
+
+    for epoch in range(num_epochs):
+        unlearn_model.train()
+        epoch_loss = 0.0
+        correct = total = 0
+        for inputs, labels in remaining_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            optimizer.zero_grad()
+            outputs = unlearn_model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+            _, predicted = outputs.max(1)
+            correct += predicted.eq(labels).sum().item()
+            total   += labels.size(0)
+        acc = correct / total
+        scheduler.step()
+        if acc > best_acc:
+            best_acc   = acc
+            best_state = copy.deepcopy(unlearn_model.state_dict())
+        print(f"  [SISA Fallback] Epoch [{epoch+1}/{num_epochs}]  "
+              f"Loss: {epoch_loss/len(remaining_loader):.4f}  Acc: {acc:.4f}")
+
+    unlearn_model.load_state_dict(best_state)
+    return unlearn_model.cpu()
+
+
+# ----------------------------------------------------------------------
+# HELPERS
+# ----------------------------------------------------------------------
 
 def _reset_weights(module):
-    """
-    Recursively reset all learnable weights to their default initialisation.
-    Called via model.apply(_reset_weights) to reinitialise a shard from scratch.
-    """
+    """Reset all learnable parameters to default initialisation."""
     if hasattr(module, 'reset_parameters'):
         module.reset_parameters()
 
 
-# =============================================================================
-# FIXED SISA TRAINING — saves shard_indices so unlearning can use them
-# =============================================================================
-
-def sisa_training_fixed(model_class, dataset, num_shards=5, num_epochs=10,
-                         batch_size=64, lr=0.001, device=None, **model_kwargs):
-    """
-    Fixed SISA training that saves shard_indices on the ensemble model.
-
-    The original sisa_training.py discards shard assignments after training,
-    making true SISA unlearning impossible. This version attaches shard_indices
-    to the SISAEnsemble so unlearning can identify affected shards.
-
-    Args:
-        model_class  : the CNN model class (e.g. CNNModel)
-        dataset      : full training dataset
-        num_shards   : number of shards (default 5, same as original)
-        num_epochs   : epochs per shard
-        batch_size   : dataloader batch size
-        lr           : Adam learning rate
-        device       : torch.device
-        **model_kwargs: passed to model_class constructor (e.g. num_classes, in_channels)
-
-    Returns:
-        SISAEnsemble with .shard_indices attribute populated
-    """
-    from models.architectures.sisa_model import SISAEnsemble
-
-    if device is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    n = len(dataset)
-    shard_size = n // num_shards          # tail samples discarded (matches original)
-    criterion = nn.CrossEntropyLoss()
-
-    # Build shard index assignments BEFORE training so they can be saved
-    all_indices = list(range(n))
-    shard_indices = [
-        all_indices[i * shard_size: (i + 1) * shard_size]
-        for i in range(num_shards)
-    ]
-
-    shard_models = []
-
-    for shard_id in range(num_shards):
-        print(f"\n[SISA Training] Training shard {shard_id+1}/{num_shards} "
-              f"({len(shard_indices[shard_id])} samples)...")
-
-        shard_subset = Subset(dataset, shard_indices[shard_id])
-        shard_loader = DataLoader(shard_subset, batch_size=batch_size,
-                                  shuffle=True, num_workers=2, pin_memory=True)
-
-        model = model_class(**model_kwargs).to(device)
-        optimizer = optim.Adam(model.parameters(), lr=lr)
-
-        model.train()
-        for epoch in range(num_epochs):
-            epoch_loss = 0.0
-            correct = 0
-            total = 0
-            for inputs, labels in shard_loader:
-                inputs, labels = inputs.to(device), labels.to(device)
-                optimizer.zero_grad()
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
-                loss.backward()
-                optimizer.step()
-                epoch_loss += loss.item()
-                _, predicted = outputs.max(1)
-                correct += predicted.eq(labels).sum().item()
-                total += labels.size(0)
-
-            acc = 100.0 * correct / total
-            print(f"  Shard {shard_id} | Epoch [{epoch+1}/{num_epochs}] "
-                  f"Loss: {epoch_loss/len(shard_loader):.4f}  Acc: {acc:.2f}%")
-
-        shard_models.append(model.cpu())
-
-    # Build the ensemble
-    ensemble = SISAEnsemble(shard_models)
-
-    # KEY FIX: attach shard assignments so unlearning can use them
-    ensemble.shard_indices = shard_indices
-
-    print(f"\n[SISA Training] Complete. Ensemble of {num_shards} shards ready.")
-    print(f"[SISA Training] shard_indices saved on model — unlearning will work correctly.")
-
-    return ensemble
-
-
-# =============================================================================
-# USAGE EXAMPLE
-# =============================================================================
-
-if __name__ == "__main__":
-    """
-    Minimal usage example showing how training and unlearning connect.
-
-    Assumes:
-        - CNNModel at models/architectures/cnn_model.py
-        - SISAEnsemble at models/architectures/sisa_model.py
-        - torchvision MNIST available
-    """
-    import torchvision
-    import torchvision.transforms as transforms
-    from models.architectures.cnn_model import CNNModel
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))
-    ])
-
-    train_dataset = torchvision.datasets.MNIST(
-        root='./data', train=True, download=True, transform=transform
-    )
-
-    # --- Step 1: Train with fixed SISA (saves shard_indices) ---
-    ensemble = sisa_training_fixed(
-        model_class=CNNModel,
-        dataset=train_dataset,
-        num_shards=5,
-        num_epochs=10,
-        batch_size=64,
-        lr=0.001,
-        device=device,
-        num_classes=10,
-        in_channels=1
-    )
-
-    # --- Step 2: Define which samples to delete (e.g. random 500) ---
-    import random
-    deleted_indices = random.sample(range(len(train_dataset)), 500)
-
-    # --- Step 3: True SISA unlearning — only affected shards retrained ---
-    result = sisa_unlearning(
-        sisa_model=ensemble,
-        full_dataset=train_dataset,
-        deleted_indices=deleted_indices,
-        num_epochs=10,
-        batch_size=64,
-        lr=0.001,
-        device=device
-    )
-
-    print(f"\nAffected shards retrained : {result['affected_shards']}")
-    print(f"Unlearning time           : {result['time']:.2f}s")
-    print(f"Untouched shards          : "
-          f"{[i for i in range(5) if i not in result['affected_shards']]}")
-
-    # Expected output with 500 random deletions across 5 shards of 12000 each:
-    # Almost certainly all 5 shards are affected (each shard likely contains ~100 deleted)
-    # But with targeted/class deletion, often only 1-2 shards are affected → big speedup
+def _get_base_dataset(dataset):
+    """Unwrap Subset layers to get the base torchvision dataset."""
+    while isinstance(dataset, Subset):
+        dataset = dataset.dataset
+    return dataset
