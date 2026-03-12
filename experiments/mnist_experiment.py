@@ -117,10 +117,10 @@ def run_experiment():
     # ----------------------------------------------------------------
     # PHASE 2: Deletion — random deletion using config DELETE_SAMPLES
     # ----------------------------------------------------------------
-    deleted_indices, remaining_dataset, deleted_dataset = random_deletion(
+    remaining_dataset, deleted_dataset = random_deletion(
         train_dataset, DELETE_SAMPLES
     )
-    print(f"[{DATASET_NAME}] Random deletion: {len(deleted_indices)} samples removed. "
+    print(f"[{DATASET_NAME}] Random deletion: {DELETE_SAMPLES} samples removed. "
           f"Remaining: {len(remaining_dataset)}")
 
     # ----------------------------------------------------------------
