@@ -45,7 +45,7 @@ import copy
 
 
 def influence_unlearning(model, remaining_dataset, deleted_dataset,
-                         num_classes, in_channels, num_epochs=10,
+                         num_classes, input_channels, input_size, num_epochs=10,
                          batch_size=64, lr=0.0005, device=None,
                          fim_samples=2000, fim_damping=1e-3,
                          recovery_epochs=2):
