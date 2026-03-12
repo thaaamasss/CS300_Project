@@ -1,19 +1,23 @@
 """
 MNIST Experiment — Fixed
 Fixes applied:
-  #1  loss=0.0 replaced with actual tracked loss
-  #8  Data augmentation added (train only)
+  - Uses load_mnist() from datasets/mnist/mnist_loader.py (no manual download)
+  - train_dataset extracted from loader via .dataset
+  - Best model selected by training accuracy (accuracy first, time as tiebreaker)
+  - Each unlearning method receives an independent deepcopy of best_model
+  - loss=0.0 replaced with actual tracked loss (#1)
+  - Augmentation added to loader (#8) — see mnist_loader.py
 """
 
 import torch
-import torchvision
-import torchvision.transforms as transforms
-from torch.utils.data import DataLoader, Subset
-import random, time, sys, os
+import copy
+import time
+import sys
+import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.architectures.cnn_model import CNNModel
+from datasets.mnist.mnist_loader import load_mnist
 from learning_algorithms.sgd_training import sgd_training
 from learning_algorithms.adam_training import adam_training
 from learning_algorithms.rmsprop_training import rmsprop_training
@@ -23,35 +27,34 @@ from unlearning_algorithms.retraining_unlearning import retraining_unlearning
 from unlearning_algorithms.finetune_unlearning import finetune_unlearning
 from unlearning_algorithms.influence_unlearning import influence_unlearning
 from unlearning_algorithms.sisa_unlearning import sisa_unlearning
-from evaluation.evaluate_learning import evaluate_learning
-from evaluation.evaluate_unlearning import evaluate_unlearning
+from evaluation.evaluate_learning import evaluate_learning_algorithms
+from evaluation.evaluate_unlearning import evaluate_unlearning_algorithms
+from torch.utils.data import DataLoader
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-DELETE_SAMPLES = 500
+DEVICE     = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 BATCH_SIZE = 64
 NUM_EPOCHS = 10
-
-# FIX #8: augmentation for training set
-train_transform = transforms.Compose([
-    transforms.RandomCrop(28, padding=4),       # MNIST is 28x28
-    transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
-    transforms.Normalize((0.1307,), (0.3081,))
-])
-
-test_transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize((0.1307,), (0.3081,))
-])
-
-train_dataset = torchvision.datasets.MNIST(root='./data', train=True,
-                                            download=True, transform=train_transform)
-test_dataset  = torchvision.datasets.MNIST(root='./data', train=False,
-                                            download=True, transform=test_transform)
-test_loader   = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+DELETE_SAMPLES = 500
 
 
-def run_learning():
+def run_experiment():
+    print("=" * 60)
+    print("MNIST EXPERIMENT")
+    print("=" * 60)
+
+    # ----------------------------------------------------------------
+    # Load datasets via repo loader
+    # ----------------------------------------------------------------
+    train_loader, test_loader = load_mnist(batch_size=BATCH_SIZE)
+
+    # Extract underlying dataset objects for deletion strategies
+    # (deletion strategies need Subset, not DataLoader)
+    train_dataset = train_loader.dataset
+    test_dataset  = test_loader.dataset
+
+    # ----------------------------------------------------------------
+    # PHASE 1: Train all learning algorithms, collect (model, metrics)
+    # ----------------------------------------------------------------
     algorithms = {
         'SGD':     sgd_training,
         'Adam':    adam_training,
@@ -64,15 +67,16 @@ def run_learning():
         print(f"\n[MNIST] Training with {name}...")
         start = time.time()
 
-        # FIX #1: training functions now return (model, final_loss) — see fixed training files
+        # Returns (model, final_loss) — see fixed training files
         model, final_loss = train_fn(
             train_dataset, num_classes=10, in_channels=1,
             num_epochs=NUM_EPOCHS, batch_size=BATCH_SIZE, device=DEVICE
         )
         elapsed = time.time() - start
 
-        # Evaluate accuracy on test set
+        # Evaluate on test set
         model.eval()
+        model.to(DEVICE)
         correct = total = 0
         with torch.no_grad():
             for inputs, labels in test_loader:
@@ -80,26 +84,43 @@ def run_learning():
                 outputs = model(inputs)
                 _, predicted = outputs.max(1)
                 correct += predicted.eq(labels).sum().item()
-                total += labels.size(0)
+                total   += labels.size(0)
         accuracy = correct / total
 
         learning_results[name] = {
-            'model':    model,
+            'model':    model.cpu(),
             'accuracy': accuracy,
             'time':     elapsed,
-            'loss':     final_loss,   # FIX #1: actual loss, not 0.0
+            'loss':     final_loss,
         }
         print(f"  {name}: acc={accuracy:.4f}  loss={final_loss:.4f}  time={elapsed:.1f}s")
 
-    return learning_results
+    evaluate_learning(learning_results, dataset_name='MNIST')
 
+    # ----------------------------------------------------------------
+    # Select best model: accuracy first, time as tiebreaker
+    # ----------------------------------------------------------------
+    best_name, best_result = sorted(
+        learning_results.items(),
+        key=lambda x: (-x[1]['accuracy'], x[1]['time'])
+    )[0]
+    best_model = best_result['model']
+    print(f"\n[MNIST] Best learning algorithm: {best_name} "
+          f"(acc={best_result['accuracy']:.4f})")
 
-def run_unlearning(best_model, train_dataset):
+    # ----------------------------------------------------------------
+    # PHASE 2: Apply deletion strategy
+    # ----------------------------------------------------------------
     deleted_indices, remaining_dataset, deleted_dataset = random_deletion(
         train_dataset, DELETE_SAMPLES
     )
+    print(f"[MNIST] Deleted {len(deleted_indices)} random samples. "
+          f"Remaining: {len(remaining_dataset)}")
 
-    algorithms = {
+    # ----------------------------------------------------------------
+    # PHASE 3: Apply each unlearning method to an independent deepcopy
+    # ----------------------------------------------------------------
+    unlearn_algorithms = {
         'Retraining': retraining_unlearning,
         'FineTuning':  finetune_unlearning,
         'Influence':   influence_unlearning,
@@ -107,21 +128,26 @@ def run_unlearning(best_model, train_dataset):
     }
     unlearning_results = {}
 
-    for name, unlearn_fn in algorithms.items():
+    for name, unlearn_fn in unlearn_algorithms.items():
         print(f"\n[MNIST] Unlearning with {name}...")
+
+        # Each method gets its own independent deepcopy — no state bleeds across methods
+        model_copy = copy.deepcopy(best_model)
+
         start = time.time()
         result_model = unlearn_fn(
-            best_model, remaining_dataset, deleted_dataset,
+            model_copy, remaining_dataset, deleted_dataset,
             num_classes=10, in_channels=1,
             num_epochs=NUM_EPOCHS, batch_size=BATCH_SIZE, device=DEVICE
         )
         elapsed = time.time() - start
 
-        # Evaluate on remaining data
-        remaining_loader = DataLoader(remaining_dataset, batch_size=BATCH_SIZE, shuffle=False)
-        deleted_loader   = DataLoader(deleted_dataset,  batch_size=BATCH_SIZE, shuffle=False)
-
         result_model.eval()
+        result_model.to(DEVICE)
+
+        remaining_loader = DataLoader(remaining_dataset, batch_size=BATCH_SIZE, shuffle=False)
+        deleted_loader   = DataLoader(deleted_dataset,   batch_size=BATCH_SIZE, shuffle=False)
+
         def get_acc(loader):
             correct = total = 0
             with torch.no_grad():
@@ -134,28 +160,17 @@ def run_unlearning(best_model, train_dataset):
             return correct / total
 
         unlearning_results[name] = {
-            'model':            result_model,
-            'remaining_accuracy': get_acc(remaining_loader),
-            'deleted_accuracy':   get_acc(deleted_loader),
-            'time':             elapsed,
+            'model':               result_model.cpu(),
+            'remaining_accuracy':  get_acc(remaining_loader),
+            'deleted_accuracy':    get_acc(deleted_loader),
+            'time':                elapsed,
         }
+        print(f"  {name}: remaining={unlearning_results[name]['remaining_accuracy']:.4f}  "
+              f"deleted={unlearning_results[name]['deleted_accuracy']:.4f}  "
+              f"time={elapsed:.1f}s")
 
-    return unlearning_results
+    evaluate_unlearning(unlearning_results, dataset_name='MNIST')
 
 
 if __name__ == '__main__':
-    print("=" * 60)
-    print("MNIST EXPERIMENT")
-    print("=" * 60)
-
-    learning_results = run_learning()
-    evaluate_learning(learning_results, dataset_name='MNIST')
-
-    best_algo = sorted(
-        learning_results.items(),
-        key=lambda x: (-x[1]['accuracy'], x[1]['time'])
-    )[0]
-    print(f"\nBest learning algorithm: {best_algo[0]} ({best_algo[1]['accuracy']:.4f})")
-
-    unlearning_results = run_unlearning(best_algo[1]['model'], train_dataset)
-    evaluate_unlearning(unlearning_results, dataset_name='MNIST')
+    run_experiment()
