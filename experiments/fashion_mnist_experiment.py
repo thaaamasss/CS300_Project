@@ -102,7 +102,7 @@ def run_experiment():
         }
         print(f"  {name}: acc={accuracy:.4f}  loss={final_loss:.4f}  time={elapsed:.1f}s")
 
-    evaluate_learning(learning_results, dataset_name='FashionMNIST')
+    evaluate_learning_algorithms(learning_results, dataset_name='FashionMNIST')
 
     # ----------------------------------------------------------------
     # Select best model: accuracy first, time as tiebreaker
@@ -175,7 +175,7 @@ def run_experiment():
               f"deleted={unlearning_results[name]['deleted_accuracy']:.4f}  "
               f"time={elapsed:.1f}s")
 
-    evaluate_unlearning(unlearning_results, dataset_name='FashionMNIST')
+    evaluate_unlearning_algorithms(unlearning_results, dataset_name='FashionMNIST')
 
 
 if __name__ == '__main__':
