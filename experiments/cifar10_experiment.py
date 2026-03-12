@@ -133,7 +133,10 @@ def run_experiment():
     for name, unlearn_fn in unlearn_algorithms.items():
         print(f"\n[{DATASET_NAME}] Unlearning with {name}...")
 
-        model_copy = copy.deepcopy(best_model)
+        # SISA unlearning must run on the SISA-trained model (needs shard_indices)
+        # All other methods run on best_model (Adam)
+        source_model = learning_results["SISA"]["model"] if name == "SISA" else best_model
+        model_copy = copy.deepcopy(source_model)
 
         start = time.time()
         result_model = unlearn_fn(
