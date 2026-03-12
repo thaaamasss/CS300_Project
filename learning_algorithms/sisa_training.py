@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, Subset
 import time
 
 
-def sisa_training(dataset, num_classes, in_channels, num_shards=5,
+def sisa_training(dataset, num_classes, input_channels, input_size, num_shards=5,
                   num_epochs=10, batch_size=64, lr=0.001, device=None):
     """
     SISA Training: train an ensemble of shard models independently.
@@ -62,7 +62,7 @@ def sisa_training(dataset, num_classes, in_channels, num_shards=5,
         shard_loader = DataLoader(shard_subset, batch_size=batch_size,
                                   shuffle=True, num_workers=2, pin_memory=True)
 
-        model = CNNModel(num_classes=num_classes, in_channels=in_channels).to(device)
+        model = CNNModel(input_channels=input_channels, num_classes=num_classes, input_size=input_size).to(device)
         optimizer = optim.Adam(model.parameters(), lr=lr)
 
         # FIX #7: cosine annealing LR scheduler
@@ -93,10 +93,8 @@ def sisa_training(dataset, num_classes, in_channels, num_shards=5,
         all_losses.append(final_loss)
         shard_models.append(model.cpu())
 
-    ensemble = SISAEnsemble(shard_models)
-
-    # FIX #3: attach shard assignments so sisa_unlearning can identify affected shards
-    ensemble.shard_indices = shard_indices
+    # Pass shard_indices into constructor — stored natively, survives deepcopy
+    ensemble = SISAEnsemble(shard_models, shard_indices=shard_indices)
 
     avg_loss = sum(all_losses) / len(all_losses)
     print(f"\n[SISA] Training complete. Average shard loss: {avg_loss:.4f}")
