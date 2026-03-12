@@ -27,8 +27,8 @@ from unlearning_algorithms.retraining_unlearning import retraining_unlearning
 from unlearning_algorithms.finetune_unlearning import finetune_unlearning
 from unlearning_algorithms.influence_unlearning import influence_unlearning
 from unlearning_algorithms.sisa_unlearning import sisa_unlearning
-from evaluation.evaluate_learning import evaluate_learning_algorithms
-from evaluation.evaluate_unlearning import evaluate_unlearning_algorithms
+from evaluation.evaluate_learning import evaluate_learning_algorithms as evaluate_learning
+from evaluation.evaluate_unlearning import evaluate_unlearning_algorithms as evaluate_unlearning
 from torch.utils.data import DataLoader
 
 DEVICE              = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -66,7 +66,7 @@ def run_experiment():
         start = time.time()
 
         model, final_loss = train_fn(
-            train_dataset, num_classes=100, in_channels=3,
+            train_dataset, num_classes=100, input_channels=3, input_size=32,
             num_epochs=NUM_EPOCHS, batch_size=BATCH_SIZE, device=DEVICE
         )
         elapsed = time.time() - start
@@ -91,7 +91,7 @@ def run_experiment():
         }
         print(f"  {name}: acc={accuracy:.4f}  loss={final_loss:.4f}  time={elapsed:.1f}s")
 
-    evaluate_learning_algorithms(learning_results, dataset_name='CIFAR100')
+    evaluate_learning(learning_results, dataset_name='CIFAR100')
 
     # ----------------------------------------------------------------
     # Select best model: accuracy first, time as tiebreaker
@@ -132,7 +132,7 @@ def run_experiment():
         start = time.time()
         result_model = unlearn_fn(
             model_copy, remaining_dataset, deleted_dataset,
-            num_classes=100, in_channels=3,
+            num_classes=100, input_channels=3, input_size=32,
             num_epochs=NUM_EPOCHS, batch_size=BATCH_SIZE, device=DEVICE
         )
         elapsed = time.time() - start
@@ -164,7 +164,7 @@ def run_experiment():
               f"deleted={unlearning_results[name]['deleted_accuracy']:.4f}  "
               f"time={elapsed:.1f}s")
 
-    evaluate_unlearning_algorithms(unlearning_results, dataset_name='CIFAR100')
+    evaluate_unlearning(unlearning_results, dataset_name='CIFAR100')
 
 
 if __name__ == '__main__':
