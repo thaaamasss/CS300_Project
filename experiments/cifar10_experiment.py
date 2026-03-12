@@ -1,13 +1,12 @@
 """
-Fashion-MNIST Experiment — Fixed
+CIFAR-10 Experiment — Fixed
 Fixes applied:
-  - Uses load_fashion_mnist() from datasets/fashion_mnist/fashion_mnist_loader.py
+  - Uses load_cifar10() from datasets/cifar10/cifar10_loader.py
   - train_dataset extracted from loader via .dataset
   - Best model selected by training accuracy (accuracy first, time as tiebreaker)
   - Each unlearning method receives an independent deepcopy of best_model
   - loss=0.0 replaced with actual tracked loss (#1)
-  - Targeted deletion now semantically targets class 3 (Dress) (#4)
-  - Augmentation added to loader (#8) — see fashion_mnist_loader.py
+  - Augmentation added to loader (#8) — see cifar10_loader.py
 """
 
 import torch
@@ -18,48 +17,38 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from datasets.fashion_mnist.fashion_mnist_loader import load_fashion_mnist
+from datasets.cifar10.cifar10_loader import load_cifar10
 from learning_algorithms.sgd_training import sgd_training
 from learning_algorithms.adam_training import adam_training
 from learning_algorithms.rmsprop_training import rmsprop_training
 from learning_algorithms.sisa_training import sisa_training
-from deletion_strategies.targeted_deletion import targeted_deletion
+from deletion_strategies.class_deletion import class_deletion
 from unlearning_algorithms.retraining_unlearning import retraining_unlearning
 from unlearning_algorithms.finetune_unlearning import finetune_unlearning
 from unlearning_algorithms.influence_unlearning import influence_unlearning
 from unlearning_algorithms.sisa_unlearning import sisa_unlearning
-from evaluation.evaluate_learning import evaluate_learning_algorithms
-from evaluation.evaluate_unlearning import evaluate_unlearning_algorithms
+from evaluation.evaluate_learning import evaluate_learning_algorithms as evaluate_learning
+from evaluation.evaluate_unlearning import evaluate_unlearning_algorithms as evaluate_unlearning
 from torch.utils.data import DataLoader
 
-DEVICE     = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-BATCH_SIZE = 64
-NUM_EPOCHS = 10
+DEVICE         = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+BATCH_SIZE     = 64
+NUM_EPOCHS     = 10
+CLASS_TO_DELETE = 5   # Dogs
 
 
 def run_experiment():
     print("=" * 60)
-    print("FASHION-MNIST EXPERIMENT")
+    print("CIFAR-10 EXPERIMENT")
     print("=" * 60)
 
     # ----------------------------------------------------------------
     # Load datasets via repo loader
     # ----------------------------------------------------------------
-    train_loader, test_loader = load_fashion_mnist(batch_size=BATCH_SIZE)
+    train_loader, test_loader = load_cifar10(batch_size=BATCH_SIZE)
 
     train_dataset = train_loader.dataset
     test_dataset  = test_loader.dataset
-
-    # ----------------------------------------------------------------
-    # FIX #4: Semantically meaningful targeted deletion
-    # Target class 3 = Dress — first 500 samples of that class
-    # Original used hardcoded range(10000, 10500) with no semantic meaning
-    # ----------------------------------------------------------------
-    targets = torch.tensor(train_dataset.targets)
-    dress_indices   = torch.where(targets == 3)[0].tolist()
-    indices_to_delete = dress_indices[:500]
-    print(f"[Fashion-MNIST] Targeted deletion: class 3 (Dress), "
-          f"{len(indices_to_delete)} samples")
 
     # ----------------------------------------------------------------
     # PHASE 1: Train all learning algorithms
@@ -73,11 +62,11 @@ def run_experiment():
     learning_results = {}
 
     for name, train_fn in algorithms.items():
-        print(f"\n[Fashion-MNIST] Training with {name}...")
+        print(f"\n[CIFAR-10] Training with {name}...")
         start = time.time()
 
         model, final_loss = train_fn(
-            train_dataset, num_classes=10, in_channels=1,
+            train_dataset, num_classes=10, input_channels=3, input_size=32,
             num_epochs=NUM_EPOCHS, batch_size=BATCH_SIZE, device=DEVICE
         )
         elapsed = time.time() - start
@@ -102,7 +91,7 @@ def run_experiment():
         }
         print(f"  {name}: acc={accuracy:.4f}  loss={final_loss:.4f}  time={elapsed:.1f}s")
 
-    evaluate_learning_algorithms(learning_results, dataset_name='FashionMNIST')
+    evaluate_learning(learning_results, dataset_name='CIFAR10')
 
     # ----------------------------------------------------------------
     # Select best model: accuracy first, time as tiebreaker
@@ -112,17 +101,15 @@ def run_experiment():
         key=lambda x: (-x[1]['accuracy'], x[1]['time'])
     )[0]
     best_model = best_result['model']
-    print(f"\n[Fashion-MNIST] Best learning algorithm: {best_name} "
+    print(f"\n[CIFAR-10] Best learning algorithm: {best_name} "
           f"(acc={best_result['accuracy']:.4f})")
 
     # ----------------------------------------------------------------
-    # PHASE 2: Apply targeted deletion
+    # PHASE 2: Apply class deletion (FIX #2 — vectorised in class_deletion.py)
     # ----------------------------------------------------------------
-    remaining_dataset, deleted_dataset = targeted_deletion(
-        train_dataset, indices_to_delete
-    )
-    print(f"[Fashion-MNIST] Remaining: {len(remaining_dataset)}  "
-          f"Deleted: {len(deleted_dataset)}")
+    remaining_dataset, deleted_dataset = class_deletion(train_dataset, CLASS_TO_DELETE)
+    print(f"[CIFAR-10] Deleted class {CLASS_TO_DELETE} (Dogs). "
+          f"Remaining: {len(remaining_dataset)}  Deleted: {len(deleted_dataset)}")
 
     # ----------------------------------------------------------------
     # PHASE 3: Each unlearning method on an independent deepcopy
@@ -136,14 +123,14 @@ def run_experiment():
     unlearning_results = {}
 
     for name, unlearn_fn in unlearn_algorithms.items():
-        print(f"\n[Fashion-MNIST] Unlearning with {name}...")
+        print(f"\n[CIFAR-10] Unlearning with {name}...")
 
         model_copy = copy.deepcopy(best_model)
 
         start = time.time()
         result_model = unlearn_fn(
             model_copy, remaining_dataset, deleted_dataset,
-            num_classes=10, in_channels=1,
+            num_classes=10, input_channels=3, input_size=32,
             num_epochs=NUM_EPOCHS, batch_size=BATCH_SIZE, device=DEVICE
         )
         elapsed = time.time() - start
@@ -175,7 +162,7 @@ def run_experiment():
               f"deleted={unlearning_results[name]['deleted_accuracy']:.4f}  "
               f"time={elapsed:.1f}s")
 
-    evaluate_unlearning_algorithms(unlearning_results, dataset_name='FashionMNIST')
+    evaluate_unlearning(unlearning_results, dataset_name='CIFAR10')
 
 
 if __name__ == '__main__':
