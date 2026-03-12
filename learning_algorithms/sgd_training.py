@@ -1,98 +1,80 @@
+"""
+sgd_training.py — Fixed
+Fixes applied:
+  #1  Returns (model, final_loss) instead of just model
+  #6  Added momentum=0.9 and weight_decay=1e-4 (standard SGD)
+  #7  Added CosineAnnealingLR scheduler
+  #9  Saves and returns best-accuracy checkpoint
+"""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from tqdm import tqdm
+from torch.utils.data import DataLoader
+import copy
 
 
-# Function to train a model using SGD optimizer
-def train_sgd(model, train_loader, test_loader, device, epochs=10, learning_rate=0.01):
+def sgd_training(dataset, num_classes, in_channels, num_epochs=10,
+                 batch_size=64, lr=0.01, device=None):
+    """
+    Train a CNNModel with SGD + momentum + cosine annealing.
 
-    # Move model to CPU or GPU depending on availability
-    model.to(device)
+    Returns:
+        (best_model, final_loss) tuple
+    """
+    from models.architectures.cnn_model import CNNModel
 
-    # Loss function for classification problems
-    # CrossEntropyLoss is commonly used for multi-class classification
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
+                        num_workers=2, pin_memory=True)
+
+    model = CNNModel(num_classes=num_classes, in_channels=in_channels).to(device)
+
+    # FIX #6: momentum=0.9 and weight_decay — standard SGD, not vanilla gradient descent
+    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
+
+    # FIX #7: cosine annealing LR scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+
     criterion = nn.CrossEntropyLoss()
 
-    # Define SGD optimizer
-    # SGD updates model weights using gradients computed during backpropagation
-    optimizer = optim.SGD(model.parameters(), lr=learning_rate)
+    # FIX #9: track best model checkpoint
+    best_acc   = 0.0
+    best_state = None
+    final_loss = 0.0
 
-    # Training loop
-    for epoch in range(epochs):
-
-        # Set model to training mode
+    for epoch in range(num_epochs):
         model.train()
+        epoch_loss = 0.0
+        correct = total = 0
 
-        running_loss = 0
-
-        # Iterate over batches of training data
-        for images, labels in tqdm(train_loader):
-
-            # Move batch data to CPU/GPU
-            images = images.to(device)
-            labels = labels.to(device)
-
-            # Clear gradients from the previous step
+        for inputs, labels in loader:
+            inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
-
-            # Forward pass
-            # The model predicts class scores for the input images
-            outputs = model(images)
-
-            # Compute loss between predictions and true labels
+            outputs = model(inputs)
             loss = criterion(outputs, labels)
-
-            # Backpropagation
-            # Computes gradients of the loss with respect to model parameters
             loss.backward()
-
-            # Update model weights using SGD
             optimizer.step()
+            epoch_loss += loss.item()
+            _, predicted = outputs.max(1)
+            correct += predicted.eq(labels).sum().item()
+            total   += labels.size(0)
 
-            # Accumulate training loss
-            running_loss += loss.item()
+        final_loss = epoch_loss / len(loader)
+        acc = correct / total
+        scheduler.step()   # FIX #7
 
-        print("Epoch:", epoch + 1, "Training Loss:", running_loss)
+        # FIX #9: save best checkpoint
+        if acc > best_acc:
+            best_acc   = acc
+            best_state = copy.deepcopy(model.state_dict())
 
+        print(f"  [SGD] Epoch [{epoch+1}/{num_epochs}]  "
+              f"Loss: {final_loss:.4f}  Acc: {acc:.4f}  LR: {scheduler.get_last_lr()[0]:.6f}")
 
-    # After training, evaluate the model on the test dataset
-    accuracy = evaluate(model, test_loader, device)
+    # FIX #9: restore best weights before returning
+    model.load_state_dict(best_state)
 
-    return model, accuracy
-
-
-
-# Function to evaluate model performance on test data
-def evaluate(model, test_loader, device):
-
-    # Set model to evaluation mode
-    model.eval()
-
-    correct = 0
-    total = 0
-
-    # Disable gradient computation during evaluation
-    with torch.no_grad():
-
-        for images, labels in test_loader:
-
-            images = images.to(device)
-            labels = labels.to(device)
-
-            # Forward pass
-            outputs = model(images)
-
-            # Get predicted class index
-            _, predicted = torch.max(outputs.data, 1)
-
-            total += labels.size(0)
-
-            # Count correct predictions
-            correct += (predicted == labels).sum().item()
-
-    accuracy = 100 * correct / total
-
-    print("Test Accuracy:", accuracy)
-
-    return accuracy
+    return model.cpu(), final_loss   # FIX #1
