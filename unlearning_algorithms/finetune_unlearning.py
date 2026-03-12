@@ -1,93 +1,81 @@
+"""
+finetune_unlearning.py — Fixed
+Fixes applied:
+  #7  Added CosineAnnealingLR scheduler
+  #9  Returns best-accuracy checkpoint, not final epoch weights
+
+Fine-tuning unlearning: continue training the existing model on remaining data.
+Passive forgetting — no explicit forgetting signal.
+Does NOT provide a provable privacy guarantee.
+"""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from tqdm import tqdm
+from torch.utils.data import DataLoader
+import copy
 
 
-# Function to perform unlearning using fine-tuning
-def finetune_unlearning(model, remaining_dataset, test_loader, device,
-                        batch_size=64, epochs=5, learning_rate=0.0005):
-
+def finetune_unlearning(model, remaining_dataset, deleted_dataset,
+                        num_classes, in_channels, num_epochs=5,
+                        batch_size=64, lr=0.0005, device=None):
     """
-    model: previously trained model
-    remaining_dataset: dataset after deletion
-    test_loader: dataset used to evaluate the model
-    device: cpu or cuda
+    Fine-tune the existing model on remaining_dataset only.
+    deleted_dataset is accepted but intentionally never used.
+
+    Returns:
+        best model (by training accuracy) after fine-tuning
     """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    print("Starting fine-tuning for unlearning...")
+    # Deep copy — do not modify the original model
+    unlearn_model = copy.deepcopy(model).to(device)
 
-    # Move model to device
-    model = model.to(device)
+    remaining_loader = DataLoader(remaining_dataset, batch_size=batch_size,
+                                  shuffle=True, num_workers=2, pin_memory=True)
 
-    # DataLoader for remaining dataset
-    train_loader = torch.utils.data.DataLoader(
-        remaining_dataset,
-        batch_size=batch_size,
-        shuffle=True
-    )
+    optimizer = optim.Adam(unlearn_model.parameters(), lr=lr)
 
-    # Loss function
+    # FIX #7: scheduler over fine-tuning epochs
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+
     criterion = nn.CrossEntropyLoss()
 
-    # Optimizer (smaller LR for fine-tuning)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    # FIX #9: best-checkpoint tracking
+    best_acc   = 0.0
+    best_state = copy.deepcopy(unlearn_model.state_dict())
 
-    # Training loop
-    for epoch in range(epochs):
+    for epoch in range(num_epochs):
+        unlearn_model.train()
+        epoch_loss = 0.0
+        correct = total = 0
 
-        model.train()
-        running_loss = 0
-
-        for images, labels in tqdm(train_loader, desc=f"FineTune Epoch {epoch+1}"):
-
-            images = images.to(device)
-            labels = labels.to(device)
-
+        for inputs, labels in remaining_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
-
-            outputs = model(images)
-
+            outputs = unlearn_model(inputs)
             loss = criterion(outputs, labels)
-
             loss.backward()
-
             optimizer.step()
+            epoch_loss += loss.item()
+            _, predicted = outputs.max(1)
+            correct += predicted.eq(labels).sum().item()
+            total   += labels.size(0)
 
-            running_loss += loss.item()
+        acc = correct / total
+        scheduler.step()   # FIX #7
 
-        print("Fine-tune Epoch:", epoch + 1, "Training Loss:", running_loss)
+        # FIX #9: save best checkpoint
+        if acc > best_acc:
+            best_acc   = acc
+            best_state = copy.deepcopy(unlearn_model.state_dict())
 
-    # Evaluate model after fine-tuning
-    accuracy = evaluate(model, test_loader, device)
+        print(f"  [FineTuning] Epoch [{epoch+1}/{num_epochs}]  "
+              f"Loss: {epoch_loss/len(remaining_loader):.4f}  Acc: {acc:.4f}")
 
-    return model, accuracy
+    # FIX #9: restore best weights
+    unlearn_model.load_state_dict(best_state)
+    print(f"  [FineTuning] Best epoch accuracy: {best_acc:.4f}")
 
-
-# Function to evaluate model performance
-def evaluate(model, test_loader, device):
-
-    model.eval()
-
-    correct = 0
-    total = 0
-
-    with torch.no_grad():
-
-        for images, labels in test_loader:
-
-            images = images.to(device)
-            labels = labels.to(device)
-
-            outputs = model(images)
-
-            _, predicted = torch.max(outputs.data, 1)
-
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-
-    accuracy = 100 * correct / total
-
-    print("Test Accuracy after fine-tuning:", accuracy)
-
-    return accuracy
+    return unlearn_model.cpu()
