@@ -1,94 +1,92 @@
+"""
+influence_unlearning.py — Fixed
+Fixes applied:
+  #5  Explicit num_unlearn_epochs variable (kept at 1, but now documented and configurable)
+  #9  Saves and returns best-accuracy checkpoint on remaining data
+"""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from tqdm import tqdm
+from torch.utils.data import DataLoader
+import copy
 
 
-# Function to approximate influence-based unlearning
-def influence_unlearning(model, deleted_dataset, test_loader, device,
-                         batch_size=64, learning_rate=0.0005):
-
+def influence_unlearning(model, remaining_dataset, deleted_dataset,
+                         num_classes, in_channels, num_epochs=10,
+                         batch_size=64, lr=0.0005, device=None):
     """
-    model: trained model
-    deleted_dataset: samples that must be forgotten
-    test_loader: dataset used for evaluation
-    device: cpu or cuda
+    Influence-based unlearning via gradient negation.
+
+    Approximates true influence unlearning (which requires H^-1 * grad)
+    by using raw gradient negation — equivalent to assuming H^-1 = Identity.
+
+    Stable only for small, incoherent deletions. Catastrophically unstable
+    for class deletion or large batch deletion (see project analysis).
+
+    FIX #5: num_unlearn_epochs is now an explicit variable (kept at 1).
+    This makes the design choice visible and testable rather than accidental.
+    Increasing beyond 1 amplifies instability — kept at 1 intentionally.
     """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    print("Starting influence-based unlearning...")
+    unlearn_model = copy.deepcopy(model).to(device)
+    deleted_loader = DataLoader(deleted_dataset, batch_size=batch_size,
+                                shuffle=True, num_workers=2, pin_memory=True)
+    remaining_loader = DataLoader(remaining_dataset, batch_size=batch_size,
+                                  shuffle=False, num_workers=2, pin_memory=True)
 
-    # Move model to device
-    model = model.to(device)
-
-    # DataLoader for deleted samples
-    delete_loader = torch.utils.data.DataLoader(
-        deleted_dataset,
-        batch_size=batch_size,
-        shuffle=True
-    )
-
-    # Loss function
+    optimizer = optim.SGD(unlearn_model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
 
-    # Optimizer
-    optimizer = optim.SGD(model.parameters(), lr=learning_rate)
+    # FIX #5: explicit epoch count — documented design choice, not accidental omission
+    # Kept at 1: more epochs amplify gradient negation and increase collapse risk.
+    # To experiment: increase cautiously and monitor remaining_accuracy.
+    num_unlearn_epochs = 1
 
-    # Training mode
-    model.train()
+    # FIX #9: best-checkpoint tracking on remaining data
+    best_acc   = _eval_acc(unlearn_model, remaining_loader, device)
+    best_state = copy.deepcopy(unlearn_model.state_dict())
 
-    # Reverse gradient contribution of deleted samples
-    for images, labels in tqdm(delete_loader, desc="Influence Unlearning"):
+    for epoch in range(num_unlearn_epochs):
+        unlearn_model.train()
+        for inputs, labels in deleted_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            optimizer.zero_grad()
+            outputs = unlearn_model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
 
-        images = images.to(device)
-        labels = labels.to(device)
+            # Negate all gradients — approximation of -H^-1 * grad
+            for param in unlearn_model.parameters():
+                if param.grad is not None:
+                    param.grad.neg_()
 
-        optimizer.zero_grad()
+            optimizer.step()
 
-        outputs = model(images)
+        # FIX #9: checkpoint if remaining accuracy improved
+        acc = _eval_acc(unlearn_model, remaining_loader, device)
+        print(f"  [Influence] Epoch [{epoch+1}/{num_unlearn_epochs}]  "
+              f"Remaining acc: {acc:.4f}")
+        if acc > best_acc:
+            best_acc   = acc
+            best_state = copy.deepcopy(unlearn_model.state_dict())
 
-        loss = criterion(outputs, labels)
+    # FIX #9: restore best checkpoint
+    unlearn_model.load_state_dict(best_state)
 
-        # Compute gradients
-        loss.backward()
-
-        # Reverse gradient direction
-        for param in model.parameters():
-            if param.grad is not None:
-                param.grad.neg_()
-
-        # Apply reversed gradient update
-        optimizer.step()
-
-    # Evaluate model after influence removal
-    accuracy = evaluate(model, test_loader, device)
-
-    return model, accuracy
+    return unlearn_model.cpu()
 
 
-# Function to evaluate model performance
-def evaluate(model, test_loader, device):
-
+def _eval_acc(model, loader, device):
     model.eval()
-
-    correct = 0
-    total = 0
-
+    correct = total = 0
     with torch.no_grad():
-
-        for images, labels in test_loader:
-
-            images = images.to(device)
-            labels = labels.to(device)
-
-            outputs = model(images)
-
-            _, predicted = torch.max(outputs.data, 1)
-
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-
-    accuracy = 100 * correct / total
-
-    print("Test Accuracy after influence unlearning:", accuracy)
-
-    return accuracy
+        for inputs, labels in loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            _, predicted = outputs.max(1)
+            correct += predicted.eq(labels).sum().item()
+            total   += labels.size(0)
+    return correct / total if total > 0 else 0.0
