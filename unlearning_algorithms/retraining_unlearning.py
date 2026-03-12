@@ -15,7 +15,7 @@ import copy
 
 
 def retraining_unlearning(model, remaining_dataset, deleted_dataset,
-                          num_classes, in_channels, num_epochs=10,
+                          num_classes, input_channels, input_size, num_epochs=10,
                           batch_size=64, lr=0.001, device=None):
     """
     Retrain a fresh model from scratch on remaining_dataset only.
@@ -30,7 +30,7 @@ def retraining_unlearning(model, remaining_dataset, deleted_dataset,
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Fresh model — old weights discarded entirely
-    new_model = CNNModel(num_classes=num_classes, in_channels=in_channels).to(device)
+    new_model = CNNModel(input_channels=input_channels, num_classes=num_classes, input_size=input_size).to(device)
 
     remaining_loader = DataLoader(remaining_dataset, batch_size=batch_size,
                                   shuffle=True, num_workers=2, pin_memory=True)
