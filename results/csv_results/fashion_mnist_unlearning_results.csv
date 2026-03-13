@@ -1,5 +1,0 @@
-Dataset,Algorithm,Remaining_Accuracy,Deleted_Accuracy,Unlearning_Time,Score
-fashion_mnist,Retraining,92.26,0.93,433.37014722824097,0.75
-fashion_mnist,FineTuning,92.24,0.976,223.27358865737915,0.5388804681945507
-fashion_mnist,Influence,91.56,0.98,3.9322266578674316,0.25
-fashion_mnist,SISA,91.65,0.968,241.1451370716095,0.24733357617368346
