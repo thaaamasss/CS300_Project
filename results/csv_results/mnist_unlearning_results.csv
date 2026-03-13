@@ -1,5 +1,0 @@
-Dataset,Algorithm,Remaining_Accuracy,Deleted_Accuracy,Unlearning_Time,Score
-mnist,Retraining,98.97,0.994,849.5693852901459,0.35
-mnist,FineTuning,99.22,1.0,449.3923008441925,0.5189941232564228
-mnist,Influence,99.21,1.0,8.81970477104187,0.6339999999999919
-mnist,SISA,99.18,0.994,447.60246443748474,0.8055263376741688
