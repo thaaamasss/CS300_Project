@@ -1,96 +1,64 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from tqdm import tqdm
+from torch.utils.data import DataLoader
+import copy
 
 
-# Function to train the model using the RMSProp optimizer
-def train_rmsprop(model, train_loader, test_loader, device, epochs=10, learning_rate=0.001):
+def rmsprop_training(dataset, num_classes, input_channels, input_size, num_epochs=10,
+                     batch_size=64, lr=0.001, device=None):
+    from models.architectures.cnn_model import CNNModel
 
-    # Move the model to CPU or GPU depending on availability
-    model.to(device)
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # CrossEntropyLoss is commonly used for classification problems
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
+                        num_workers=2, pin_memory=True)
+
+    model = CNNModel(input_channels=input_channels, num_classes=num_classes, input_size=input_size).to(device)
+
+    optimizer = optim.RMSprop(model.parameters(), lr=lr)
+
+    # FIX #7: cosine annealing LR scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+
     criterion = nn.CrossEntropyLoss()
 
-    # Define RMSProp optimizer
-    # RMSProp adapts learning rates by dividing the gradient
-    # by a running average of its recent magnitude
-    optimizer = optim.RMSprop(model.parameters(), lr=learning_rate)
+    # FIX #9: track best model checkpoint
+    best_acc   = 0.0
+    best_state = None
+    final_loss = 0.0
 
-    # Training loop over multiple epochs
-    for epoch in range(epochs):
-
-        # Set the model to training mode
+    for epoch in range(num_epochs):
         model.train()
+        epoch_loss = 0.0
+        correct = total = 0
 
-        running_loss = 0
-
-        # Iterate through the training dataset batch by batch
-        for images, labels in tqdm(train_loader):
-
-            # Move images and labels to device
-            images = images.to(device)
-            labels = labels.to(device)
-
-            # Clear gradients from previous iteration
+        for inputs, labels in loader:
+            inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
-
-            # Forward pass: compute predictions
-            outputs = model(images)
-
-            # Compute the loss
+            outputs = model(inputs)
             loss = criterion(outputs, labels)
-
-            # Backpropagation: compute gradients
             loss.backward()
-
-            # Update model parameters using RMSProp
             optimizer.step()
+            epoch_loss += loss.item()
+            _, predicted = outputs.max(1)
+            correct += predicted.eq(labels).sum().item()
+            total   += labels.size(0)
 
-            # Track total loss for this epoch
-            running_loss += loss.item()
+        final_loss = epoch_loss / len(loader)
+        acc = correct / total
+        scheduler.step()   # FIX #7
 
-        print("Epoch:", epoch + 1, "Training Loss:", running_loss)
+        # FIX #9: save best checkpoint
+        if acc > best_acc:
+            best_acc   = acc
+            best_state = copy.deepcopy(model.state_dict())
 
+        print(f"  [RMSProp] Epoch [{epoch+1}/{num_epochs}]  "
+              f"Loss: {final_loss:.4f}  Acc: {acc:.4f}  LR: {scheduler.get_last_lr()[0]:.6f}")
 
-    # After training, evaluate model performance
-    accuracy = evaluate(model, test_loader, device)
+    # FIX #9: restore best weights
+    model.load_state_dict(best_state)
 
-    return model, accuracy
-
-
-
-# Function to evaluate model accuracy on the test dataset
-def evaluate(model, test_loader, device):
-
-    # Set model to evaluation mode
-    model.eval()
-
-    correct = 0
-    total = 0
-
-    # Disable gradient calculations during evaluation
-    with torch.no_grad():
-
-        for images, labels in test_loader:
-
-            images = images.to(device)
-            labels = labels.to(device)
-
-            # Forward pass
-            outputs = model(images)
-
-            # Get predicted class index
-            _, predicted = torch.max(outputs.data, 1)
-
-            total += labels.size(0)
-
-            # Count correct predictions
-            correct += (predicted == labels).sum().item()
-
-    accuracy = 100 * correct / total
-
-    print("Test Accuracy:", accuracy)
-
-    return accuracy
+    return model.cpu(), final_loss   # FIX #1

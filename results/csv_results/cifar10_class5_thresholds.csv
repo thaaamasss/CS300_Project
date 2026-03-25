@@ -1,0 +1,7 @@
+Strategy,Unlearning_Algo,Threshold_Pct,Deleted_Acc_At_Threshold
+Targeted,Retraining,90,0.0344
+Targeted,FineTuning,100,n/a
+Random,Retraining,never,n/a
+Random,FineTuning,never,n/a
+Batch,Retraining,never,n/a
+Batch,FineTuning,never,n/a

@@ -1,148 +1,139 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from tqdm import tqdm
+from torch.utils.data import DataLoader, Subset
+import copy
 
-from models.architectures.sisa_model import SISAEnsemble
-
-def create_shards(dataset, num_shards):
-
-
-    shard_size = len(dataset) // num_shards
-    shards = []
-
-    for i in range(num_shards):
-
-        start = i * shard_size
-        end = start + shard_size
-
-        shards.append(
-            torch.utils.data.Subset(
-                dataset,
-                list(range(start, end))
-            )
-        )
-
-    return shards
+from utils.config import NUM_SLICES
 
 
-def train_shard_model(model, train_loader, device, epochs=10, learning_rate=0.001):
+def sisa_training(dataset, num_classes, input_channels, input_size,
+                  num_shards=5, num_slices=None, num_epochs=10,
+                  batch_size=64, lr=0.001, device=None):
+    from models.architectures.cnn_model import CNNModel
+    from models.architectures.sisa_model import SISAEnsemble
 
+    if num_slices is None:
+        num_slices = NUM_SLICES
 
-    model.to(device)
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    n = len(dataset)
+    shard_size = n // num_shards
+    remainder = n % num_shards
+    all_indices = list(range(n))
+
+    # Build shard index lists
+    shard_indices = [
+        all_indices[i * shard_size: (i + 1) * shard_size]
+        for i in range(num_shards)
+    ]
+    # Distribute remainder samples
+    for i in range(remainder):
+        shard_indices[i].append(all_indices[num_shards * shard_size + i])
+
+    if remainder > 0:
+        print(f"[SISA] Distributed {remainder} remainder sample(s) "
+              f"across first {remainder} shard(s).")
+
+    print(f"[SISA] {num_shards} shards × {num_slices} slice(s) = "
+          f"{num_shards * num_slices} training segments.")
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
-    for epoch in range(epochs):
-
-        model.train()
-        running_loss = 0
-
-        for images, labels in tqdm(train_loader):
-
-            images = images.to(device)
-            labels = labels.to(device)
-
-            optimizer.zero_grad()
-
-            outputs = model(images)
-
-            loss = criterion(outputs, labels)
-
-            loss.backward()
-
-            optimizer.step()
-
-            running_loss += loss.item()
-
-        print("Shard Training Epoch:", epoch + 1, "Loss:", running_loss)
-
-    return model
-
-
-def train_sisa(
-model_class,
-train_dataset,
-test_loader,
-device,
-input_channels,
-num_classes,
-input_size,
-num_shards=5,
-batch_size=64
-):
-
-
-    print("Creating dataset shards...")
-
-    shards = create_shards(train_dataset, num_shards)
-
     shard_models = []
+    shard_checkpoints = []   # list of lists: shard_checkpoints[shard][slice] = (cumulative_indices, state_dict)
+    all_losses = []
 
-    for i, shard in enumerate(shards):
+    for shard_id in range(num_shards):
+        print(f"\n[SISA] === Shard {shard_id + 1}/{num_shards} "
+              f"({len(shard_indices[shard_id])} samples) ===")
 
-        print("Training shard model:", i + 1)
+        shard_idx = shard_indices[shard_id]
+        slice_size = len(shard_idx) // num_slices
+        slice_remainder = len(shard_idx) % num_slices
 
-        shard_loader = torch.utils.data.DataLoader(
-            shard,
-            batch_size=batch_size,
-            shuffle=True
-        )
+        # Build cumulative slice index lists
+        # slice k trains on indices 0..k*slice_size (cumulative)
+        slice_boundaries = []
+        for s in range(num_slices):
+            end = (s + 1) * slice_size + (slice_remainder if s == num_slices - 1 else 0)
+            slice_boundaries.append(end)
 
-        model = model_class(
+        model = CNNModel(
             input_channels=input_channels,
             num_classes=num_classes,
             input_size=input_size
-        )
+        ).to(device)
 
-        trained_model = train_shard_model(model, shard_loader, device)
+        optimizer = optim.Adam(model.parameters(), lr=lr)
+        # Scheduler spans all slices × epochs
+        total_steps = num_slices * num_epochs
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
 
-        shard_models.append(trained_model)
+        this_shard_checkpoints = []
+        final_loss = 0.0
+        cumulative_end = 0
 
-    accuracy = evaluate_sisa(shard_models, test_loader, device)
+        for slice_id in range(num_slices):
+            cumulative_end = slice_boundaries[slice_id]
+            cumulative_indices = shard_idx[:cumulative_end]
 
-    ensemble_model = SISAEnsemble(shard_models)
+            print(f"  Slice {slice_id + 1}/{num_slices}: "
+                  f"training on {len(cumulative_indices)} cumulative samples...")
 
-    return ensemble_model, accuracy
+            shard_subset = Subset(dataset, cumulative_indices)
+            shard_loader = DataLoader(
+                shard_subset, batch_size=batch_size,
+                shuffle=True, num_workers=2, pin_memory=True
+            )
 
+            model.train()
+            for epoch in range(num_epochs):
+                epoch_loss = 0.0
+                correct = total = 0
+                for inputs, labels in shard_loader:
+                    inputs, labels = inputs.to(device), labels.to(device)
+                    optimizer.zero_grad()
+                    outputs = model(inputs)
+                    loss = criterion(outputs, labels)
+                    loss.backward()
+                    optimizer.step()
+                    epoch_loss += loss.item()
+                    _, predicted = outputs.max(1)
+                    correct += predicted.eq(labels).sum().item()
+                    total += labels.size(0)
+                final_loss = epoch_loss / len(shard_loader)
+                scheduler.step()
+                acc = 100.0 * correct / total
+                print(f"    Epoch [{epoch+1}/{num_epochs}]  "
+                      f"Loss: {final_loss:.4f}  Acc: {acc:.2f}%")
 
-def evaluate_sisa(shard_models, test_loader, device):
+            # Save checkpoint after this slice
+            checkpoint = {
+                'slice_id': slice_id,
+                'cumulative_indices': cumulative_indices,
+                'state_dict': copy.deepcopy(model.state_dict()),
+                'optimizer_state': copy.deepcopy(optimizer.state_dict()),
+            }
+            this_shard_checkpoints.append(checkpoint)
+            print(f"  Slice {slice_id + 1} checkpoint saved "
+                  f"({len(cumulative_indices)} samples seen so far).")
 
+        all_losses.append(final_loss)
+        shard_models.append(model.cpu())
+        shard_checkpoints.append(this_shard_checkpoints)
 
-    for model in shard_models:
-        model.eval()
+    ensemble = SISAEnsemble(
+        shard_models,
+        shard_indices=shard_indices,
+        shard_checkpoints=shard_checkpoints,
+        num_slices=num_slices
+    )
 
-    correct = 0
-    total = 0
+    avg_loss = sum(all_losses) / len(all_losses)
+    print(f"\n[SISA] Training complete. Average shard loss: {avg_loss:.4f}")
+    print(f"[SISA] Checkpoints stored: {num_shards} shards × "
+          f"{num_slices} slices = {num_shards * num_slices} total.")
 
-    with torch.no_grad():
-
-        for images, labels in test_loader:
-
-            images = images.to(device)
-            labels = labels.to(device)
-
-            outputs_sum = None
-
-            for model in shard_models:
-
-                outputs = model(images)
-
-                if outputs_sum is None:
-                    outputs_sum = outputs
-                else:
-                    outputs_sum += outputs
-
-            outputs_avg = outputs_sum / len(shard_models)
-
-            _, predicted = torch.max(outputs_avg, 1)
-
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-
-    accuracy = 100 * correct / total
-
-    print("SISA Test Accuracy:", accuracy)
-
-    return accuracy
+    return ensemble, avg_loss

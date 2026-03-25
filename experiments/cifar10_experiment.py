@@ -1,15 +1,21 @@
 import torch
-import time
 import copy
+import time
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.dataset_loader import load_dataset
 from utils.model_saver import save_model
-from models.architectures.cnn_model import CNNModel
+from utils.config import (
+    BATCH_SIZE, EPOCHS, DEVICE, RANDOM_SEED
+)
 
-from learning_algorithms.sgd_training import train_sgd
-from learning_algorithms.adam_training import train_adam
-from learning_algorithms.rmsprop_training import train_rmsprop
-from learning_algorithms.sisa_training import train_sisa
+from learning_algorithms.sgd_training import sgd_training
+from learning_algorithms.adam_training import adam_training
+from learning_algorithms.rmsprop_training import rmsprop_training
+from learning_algorithms.sisa_training import sisa_training
 
 from deletion_strategies.class_deletion import class_deletion
 
@@ -17,239 +23,165 @@ from unlearning_algorithms.retraining_unlearning import retraining_unlearning
 from unlearning_algorithms.finetune_unlearning import finetune_unlearning
 from unlearning_algorithms.influence_unlearning import influence_unlearning
 from unlearning_algorithms.sisa_unlearning import sisa_unlearning
-from evaluation.metrics import evaluate_model
+
 from evaluation.evaluate_learning import evaluate_learning_algorithms
 from evaluation.evaluate_unlearning import evaluate_unlearning_algorithms
 
-from utils.config import DELETE_SAMPLES
+from torch.utils.data import DataLoader
 
-def run_cifar10_experiment():
+torch.manual_seed(RANDOM_SEED)
+device = torch.device(DEVICE if torch.cuda.is_available() else 'cpu')
+
+DATASET_NAME    = 'CIFAR10'
+NUM_CLASSES     = 10
+INPUT_CHANNELS  = 3
+INPUT_SIZE      = 32
+CLASS_TO_DELETE = 5    # Dogs
 
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def run_experiment():
+    print("=" * 60)
+    print("CIFAR-10 EXPERIMENT")
+    print("=" * 60)
 
-    print("Running CIFAR-10 experiment on:", device)
-
-    train_loader, test_loader = load_dataset("cifar10")
+    # ----------------------------------------------------------------
+    # Load dataset via utils/dataset_loader.py
+    # ----------------------------------------------------------------
+    train_loader, test_loader = load_dataset('cifar10')
     train_dataset = train_loader.dataset
+    test_dataset  = test_loader.dataset
 
-    # ---------------- SGD TRAINING ----------------
-
-    model_sgd = CNNModel(input_channels=3, num_classes=10, input_size=32)
-
-    start = time.time()
-
-    trained_sgd, acc_sgd = train_sgd(
-        model_sgd,
-        train_loader,
-        test_loader,
-        device
-    )
-
-    sgd_time = time.time() - start
-    save_model(trained_sgd, "cifar10", "learning", "sgd_model.pth")
-
-    # ---------------- ADAM TRAINING ----------------
-
-    model_adam = CNNModel(input_channels=3, num_classes=10, input_size=32)
-
-    start = time.time()
-
-    trained_adam, acc_adam = train_adam(
-        model_adam,
-        train_loader,
-        test_loader,
-        device
-    )
-
-    adam_time = time.time() - start
-    save_model(trained_adam, "cifar10", "learning", "adam_model.pth")
-
-    # ---------------- RMSPROP TRAINING ----------------
-
-    model_rms = CNNModel(input_channels=3, num_classes=10, input_size=32)
-
-    start = time.time()
-
-    trained_rms, acc_rms = train_rmsprop(
-        model_rms,
-        train_loader,
-        test_loader,
-        device
-    )
-
-    rms_time = time.time() - start
-    save_model(trained_rms, "cifar10", "learning", "rmsprop_model.pth")
-
-    # ---------------- SISA TRAINING ----------------
-
-    # model_sisa = CNNModel(input_channels=3, num_classes=10, input_size=32)
-
-    start = time.time()
-
-    trained_sisa, acc_sisa = train_sisa(
-        CNNModel,
-        train_loader.dataset,
-        test_loader,
-        device,
-        input_channels=3,
-        num_classes=10,
-        input_size=32
-    )
-
-    sisa_time = time.time() - start
-    save_model(trained_sisa, "cifar10", "learning", "sisa_model.pth")
-
-    # ---------------- STORE LEARNING RESULTS ----------------
-
-    learning_results = {
-        "SGD": {"accuracy": acc_sgd, "time": sgd_time, "loss": 0.0},
-        "Adam": {"accuracy": acc_adam, "time": adam_time, "loss": 0.0},
-        "RMSProp": {"accuracy": acc_rms, "time": rms_time, "loss": 0.0},
-        "SISA": {"accuracy": acc_sisa, "time": sisa_time, "loss": 0.0}
+    # ----------------------------------------------------------------
+    # PHASE 1: Train all learning algorithms
+    # ----------------------------------------------------------------
+    algorithms = {
+        'SGD':     sgd_training,
+        'Adam':    adam_training,
+        'RMSProp': rmsprop_training,
+        'SISA':    sisa_training,
     }
+    learning_results = {}
 
-    evaluate_learning_algorithms(learning_results, "cifar10")
+    for name, train_fn in algorithms.items():
+        print(f"\n[{DATASET_NAME}] Training with {name}...")
+        start = time.time()
 
-    # ---------------- SELECT BEST LEARNING ALGORITHM ----------------
+        model, final_loss = train_fn(
+            train_dataset,
+            num_classes=NUM_CLASSES,
+            input_channels=INPUT_CHANNELS,
+            input_size=INPUT_SIZE,
+            num_epochs=EPOCHS,
+            batch_size=BATCH_SIZE,
+            device=device
+        )
+        elapsed = time.time() - start
 
-    best_algorithm = sorted(
-        learning_results.items(),
-        key=lambda x: (-x[1]["accuracy"], x[1]["time"])
-    )[0][0]
+        model.eval()
+        model.to(device)
+        correct = total = 0
+        with torch.no_grad():
+            for inputs, labels in test_loader:
+                inputs, labels = inputs.to(device), labels.to(device)
+                outputs = model(inputs)
+                _, predicted = outputs.max(1)
+                correct += predicted.eq(labels).sum().item()
+                total   += labels.size(0)
+        accuracy = correct / total
 
-    print("Best learning algorithm:", best_algorithm)
-
-    trained_models = {
-        "SGD": trained_sgd,
-        "Adam": trained_adam,
-        "RMSProp": trained_rms,
-        "SISA": trained_sisa
-    }
-
-    best_model = trained_models[best_algorithm]
-
-    # ---------------- DATA DELETION ----------------
-
-    remaining_dataset, deleted_dataset = class_deletion(
-        train_dataset,
-        class_to_delete=5
-    )
-
-    # ---------------- RETRAINING UNLEARNING ----------------
-
-    start = time.time()
-
-    retrained_model, retrain_acc = retraining_unlearning(
-        CNNModel,
-        remaining_dataset,
-        test_loader,
-        device,
-        input_channels=3,
-        num_classes=10,
-        input_size=32
-    )
-
-    retrain_time = time.time() - start
-    deleted_acc_retrain = evaluate_model(
-        retrained_model,
-        deleted_dataset,
-        device
-    )
-    save_model(retrained_model, "cifar10", "unlearning", "retraining_model.pth")
-
-    # ---------------- FINETUNING UNLEARNING ----------------
-
-    model_copy = copy.deepcopy(best_model)
-
-    start = time.time()
-
-    finetuned_model, finetune_acc = finetune_unlearning(
-        model_copy,
-        remaining_dataset,
-        test_loader,
-        device
-    )
-
-    finetune_time = time.time() - start
-    deleted_acc_finetune = evaluate_model(
-        finetuned_model,
-        deleted_dataset,
-        device
-    )
-    save_model(finetuned_model, "cifar10", "unlearning", "finetune_model.pth")
-
-    # ---------------- INFLUENCE UNLEARNING ----------------
-
-    model_copy = copy.deepcopy(best_model)
-
-    start = time.time()
-
-    influence_model, influence_acc = influence_unlearning(
-        model_copy,
-        deleted_dataset,
-        test_loader,
-        device
-    )
-
-    influence_time = time.time() - start
-    deleted_acc_influence = evaluate_model(
-        influence_model,
-        deleted_dataset,
-        device
-    )
-    save_model(influence_model, "cifar10", "unlearning", "influence_model.pth")
-
-    # ---------------- SISA UNLEARNING ----------------
-
-    # ---------------- SISA UNLEARNING ----------------
-
-    model_copy = copy.deepcopy(best_model)
-
-    start = time.time()
-
-    sisa_unlearn_model, sisa_unlearn_acc = sisa_unlearning(
-        model_copy,
-        remaining_dataset,
-        test_loader,
-        device
-    )
-
-    sisa_unlearn_time = time.time() - start
-    deleted_acc_sisa = evaluate_model(
-        sisa_unlearn_model,
-        deleted_dataset,
-        device
-    )
-    save_model(sisa_unlearn_model, "cifar10", "unlearning", "sisa_unlearn_model.pth")
-
-    # ---------------- STORE UNLEARNING RESULTS ----------------
-
-    unlearning_results = {
-        "Retraining": {
-            "remaining_accuracy": retrain_acc,
-            "deleted_accuracy": deleted_acc_retrain,
-            "time": retrain_time
-        },
-        "FineTuning": {
-            "remaining_accuracy": finetune_acc,
-            "deleted_accuracy": deleted_acc_finetune,
-            "time": finetune_time
-        },
-        "Influence": {
-            "remaining_accuracy": influence_acc,
-            "deleted_accuracy": deleted_acc_influence,
-            "time": influence_time
-        },
-        "SISA": {
-            "remaining_accuracy": sisa_unlearn_acc,
-            "deleted_accuracy": deleted_acc_sisa,
-            "time": sisa_unlearn_time
+        learning_results[name] = {
+            'model':    model.cpu(),
+            'accuracy': accuracy,
+            'time':     elapsed,
+            'loss':     final_loss,
         }
+        print(f"  {name}: acc={accuracy:.4f}  loss={final_loss:.4f}  time={elapsed:.1f}s")
+
+        save_model(model, DATASET_NAME.lower(), 'learning', f"{name.lower()}_model.pth")
+
+    evaluate_learning_algorithms(learning_results, dataset_name=DATASET_NAME)
+
+    # ----------------------------------------------------------------
+    # Select best model
+    # ----------------------------------------------------------------
+    best_name, best_result = sorted(
+        learning_results.items(),
+        key=lambda x: (-x[1]['accuracy'], x[1]['time'])
+    )[0]
+    best_model = best_result['model']
+    print(f"\n[{DATASET_NAME}] Best learning algorithm: {best_name} "
+          f"(acc={best_result['accuracy']:.4f})")
+
+    # ----------------------------------------------------------------
+    # PHASE 2: Class deletion — remove all Dogs (class 5)
+    # ----------------------------------------------------------------
+    remaining_dataset, deleted_dataset = class_deletion(train_dataset, CLASS_TO_DELETE)
+    print(f"[{DATASET_NAME}] Deleted class {CLASS_TO_DELETE} (Dogs). "
+          f"Remaining: {len(remaining_dataset)}  Deleted: {len(deleted_dataset)}")
+
+    # ----------------------------------------------------------------
+    # PHASE 3: Unlearning — each method on independent deepcopy
+    # ----------------------------------------------------------------
+    unlearn_algorithms = {
+        'Retraining': retraining_unlearning,
+        'FineTuning':  finetune_unlearning,
+        'Influence':   influence_unlearning,
+        'SISA':        sisa_unlearning,
     }
+    unlearning_results = {}
 
-    evaluate_unlearning_algorithms(unlearning_results, "cifar10")
+    for name, unlearn_fn in unlearn_algorithms.items():
+        print(f"\n[{DATASET_NAME}] Unlearning with {name}...")
+
+        # SISA unlearning must run on the SISA-trained model (needs shard_indices)
+        # All other methods run on best_model (Adam)
+        source_model = learning_results["SISA"]["model"] if name == "SISA" else best_model
+        model_copy = copy.deepcopy(source_model)
+
+        start = time.time()
+        result_model = unlearn_fn(
+            model_copy, remaining_dataset, deleted_dataset,
+            num_classes=NUM_CLASSES,
+            input_channels=INPUT_CHANNELS,
+            input_size=INPUT_SIZE,
+            num_epochs=EPOCHS,
+            batch_size=BATCH_SIZE,
+            device=device
+        )
+        elapsed = time.time() - start
+
+        result_model.eval()
+        result_model.to(device)
+
+        remaining_loader = DataLoader(remaining_dataset, batch_size=BATCH_SIZE, shuffle=False)
+        deleted_loader   = DataLoader(deleted_dataset,   batch_size=BATCH_SIZE, shuffle=False)
+
+        def get_acc(loader):
+            correct = total = 0
+            with torch.no_grad():
+                for inputs, labels in loader:
+                    inputs, labels = inputs.to(device), labels.to(device)
+                    outputs = result_model(inputs)
+                    _, predicted = outputs.max(1)
+                    correct += predicted.eq(labels).sum().item()
+                    total   += labels.size(0)
+            return correct / total
+
+        unlearning_results[name] = {
+            'model':              result_model.cpu(),
+            'remaining_accuracy': get_acc(remaining_loader),
+            'deleted_accuracy':   get_acc(deleted_loader),
+            'time':               elapsed,
+        }
+        print(f"  {name}: remaining={unlearning_results[name]['remaining_accuracy']:.4f}  "
+              f"deleted={unlearning_results[name]['deleted_accuracy']:.4f}  "
+              f"time={elapsed:.1f}s")
+
+        save_model(result_model, DATASET_NAME.lower(), 'unlearning',
+                   f"{name.lower()}_model.pth")
+
+    evaluate_unlearning_algorithms(unlearning_results, dataset_name=DATASET_NAME)
 
 
-if __name__ == "__main__":
-    run_cifar10_experiment()
+if __name__ == '__main__':
+    run_experiment()

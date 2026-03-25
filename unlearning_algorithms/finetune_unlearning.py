@@ -1,93 +1,89 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from tqdm import tqdm
+from torch.utils.data import DataLoader
+import copy
 
 
-# Function to perform unlearning using fine-tuning
-def finetune_unlearning(model, remaining_dataset, test_loader, device,
-                        batch_size=64, epochs=5, learning_rate=0.0005):
+def finetune_unlearning(model, remaining_dataset, deleted_dataset,
+                        num_classes, input_channels, input_size, num_epochs=5,
+                        batch_size=64, lr=0.0005, device=None,
+                        freeze_backbone=True):
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    """
-    model: previously trained model
-    remaining_dataset: dataset after deletion
-    test_loader: dataset used to evaluate the model
-    device: cpu or cuda
-    """
+    unlearn_model = copy.deepcopy(model).to(device)
 
-    print("Starting fine-tuning for unlearning...")
+    # Per-layer freezing
+    if freeze_backbone:
+        _freeze_backbone(unlearn_model)
+        trainable_params = [p for p in unlearn_model.parameters() if p.requires_grad]
+        frozen_params = [p for p in unlearn_model.parameters() if not p.requires_grad]
+        print(f"  [FineTuning] Backbone frozen. "
+              f"Trainable params: {sum(p.numel() for p in trainable_params):,}  "
+              f"Frozen params: {sum(p.numel() for p in frozen_params):,}")
+    else:
+        trainable_params = list(unlearn_model.parameters())
+        print(f"  [FineTuning] All layers trainable "
+              f"({sum(p.numel() for p in trainable_params):,} params).")
 
-    # Move model to device
-    model = model.to(device)
+    remaining_loader = DataLoader(remaining_dataset, batch_size=batch_size,
+                                  shuffle=True, num_workers=2, pin_memory=True)
 
-    # DataLoader for remaining dataset
-    train_loader = torch.utils.data.DataLoader(
-        remaining_dataset,
-        batch_size=batch_size,
-        shuffle=True
+    optimizer = optim.Adam(
+        [p for p in unlearn_model.parameters() if p.requires_grad], lr=lr
     )
-
-    # Loss function
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
     criterion = nn.CrossEntropyLoss()
 
-    # Optimizer (smaller LR for fine-tuning)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    best_acc = 0.0
+    best_state = copy.deepcopy(unlearn_model.state_dict())
 
-    # Training loop
-    for epoch in range(epochs):
+    for epoch in range(num_epochs):
+        unlearn_model.train()
+        epoch_loss = 0.0
+        correct = total = 0
 
-        model.train()
-        running_loss = 0
-
-        for images, labels in tqdm(train_loader, desc=f"FineTune Epoch {epoch+1}"):
-
-            images = images.to(device)
-            labels = labels.to(device)
-
+        for inputs, labels in remaining_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
-
-            outputs = model(images)
-
+            outputs = unlearn_model(inputs)
             loss = criterion(outputs, labels)
-
             loss.backward()
-
             optimizer.step()
-
-            running_loss += loss.item()
-
-        print("Fine-tune Epoch:", epoch + 1, "Training Loss:", running_loss)
-
-    # Evaluate model after fine-tuning
-    accuracy = evaluate(model, test_loader, device)
-
-    return model, accuracy
-
-
-# Function to evaluate model performance
-def evaluate(model, test_loader, device):
-
-    model.eval()
-
-    correct = 0
-    total = 0
-
-    with torch.no_grad():
-
-        for images, labels in test_loader:
-
-            images = images.to(device)
-            labels = labels.to(device)
-
-            outputs = model(images)
-
-            _, predicted = torch.max(outputs.data, 1)
-
+            epoch_loss += loss.item()
+            _, predicted = outputs.max(1)
+            correct += predicted.eq(labels).sum().item()
             total += labels.size(0)
-            correct += (predicted == labels).sum().item()
 
-    accuracy = 100 * correct / total
+        acc = correct / total
+        scheduler.step()
 
-    print("Test Accuracy after fine-tuning:", accuracy)
+        if acc > best_acc:
+            best_acc = acc
+            best_state = copy.deepcopy(unlearn_model.state_dict())
 
-    return accuracy
+        print(f"  [FineTuning] Epoch [{epoch+1}/{num_epochs}]  "
+              f"Loss: {epoch_loss/len(remaining_loader):.4f}  Acc: {acc:.4f}")
+
+    unlearn_model.load_state_dict(best_state)
+    print(f"  [FineTuning] Best epoch accuracy: {best_acc:.4f}")
+
+    return unlearn_model.cpu()
+
+
+# ----------------------------------------------------------------------
+# HELPER
+# ----------------------------------------------------------------------
+
+def _freeze_backbone(model):
+    frozen_layers = []
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Conv2d):
+            for param in module.parameters():
+                param.requires_grad = False
+            frozen_layers.append(name)
+    if frozen_layers:
+        print(f"  [FineTuning] Frozen layers: {frozen_layers}")
+    else:
+        print("  [FineTuning] WARNING: no Conv2d layers found to freeze.")

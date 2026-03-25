@@ -6,36 +6,6 @@ from evaluation.metrics import compute_unlearning_scores, find_best_algorithm
 from utils.config import CSV_RESULTS_DIR, PLOTS_DIR
 
 def evaluate_unlearning_algorithms(results, dataset_name):
-
-    """
-    Evaluate unlearning algorithms and save results.
-
-    results example format:
-
-    results = {
-        "Retraining": {
-            "remaining_accuracy": 0.981,
-            "deleted_accuracy": 0.05,
-            "time": 2400
-        },
-        "FineTuning": {
-            "remaining_accuracy": 0.978,
-            "deleted_accuracy": 0.20,
-            "time": 300
-        },
-        "SISA": {
-            "remaining_accuracy": 0.979,
-            "deleted_accuracy": 0.12,
-            "time": 180
-        },
-        "Influence": {
-            "remaining_accuracy": 0.975,
-            "deleted_accuracy": 0.18,
-            "time": 150
-        }
-    }
-    """
-
     # ------------------------------------------------
     # Create results directories
     # ------------------------------------------------

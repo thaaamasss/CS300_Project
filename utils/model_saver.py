@@ -3,16 +3,6 @@ import os
 
 
 def save_model(model, dataset_name, stage, model_name):
-
-    """
-    Save model inside learning or unlearning directory.
-
-    Example paths:
-
-    models/trained_models/mnist/learning/adam_model.pth
-    models/trained_models/mnist/unlearning/retraining_model.pth
-    """
-
     base_dir = os.path.join(
         "models",
         "trained_models",
@@ -32,11 +22,6 @@ def save_model(model, dataset_name, stage, model_name):
 
 
 def load_model(model, dataset_name, stage, model_name, device):
-
-    """
-    Load model from learning or unlearning directory.
-    """
-
     model_path = os.path.join(
         "models",
         "trained_models",

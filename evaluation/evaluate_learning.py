@@ -6,20 +6,6 @@ from evaluation.metrics import compute_learning_scores, find_best_algorithm
 from utils.config import CSV_RESULTS_DIR, PLOTS_DIR
 
 def evaluate_learning_algorithms(results, dataset_name):
-
-    """
-    Evaluate learning algorithms and save results.
-
-    results example:
-
-    results = {
-        "SGD": {"accuracy": 0.978, "time": 360, "loss": 0.12},
-        "Adam": {"accuracy": 0.983, "time": 240, "loss": 0.08},
-        "RMSProp": {"accuracy": 0.981, "time": 300, "loss": 0.09},
-        "SISA": {"accuracy": 0.975, "time": 420, "loss": 0.11}
-    }
-    """
-
     # ------------------------------------------------
     # Create result directories
     # ------------------------------------------------

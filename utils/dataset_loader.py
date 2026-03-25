@@ -8,16 +8,6 @@ from datasets.cifar100.cifar100_loader import load_cifar100
 
 
 def load_dataset(dataset_name):
-    """
-    Load dataset based on its name.
-
-    Parameters:
-        dataset_name (str): name of the dataset
-
-    Returns:
-        train_loader, test_loader
-    """
-
     dataset_name = dataset_name.lower()
 
     # MNIST dataset
